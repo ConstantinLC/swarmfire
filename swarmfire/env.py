@@ -46,6 +46,10 @@ class EnvConfig:
     slope: tuple[float, float] = (0.0, 0.0)
     heterogeneous: bool = False
     ignition: tuple[int, int] | None = None  # defaults to grid centre
+    # Seconds between ignition and the first moment suppressant may be
+    # released: detection, reporting, and the flight out. Ignored when a
+    # pre-built Platform instance is passed instead of a name.
+    dispatch_s: float = 0.0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     # Reward weights, in hectares-equivalent per unit.
     water_cost_per_kl: float = 0.02
@@ -64,7 +68,11 @@ class FireEnv:
         config: EnvConfig | None = None,
     ):
         self.cfg = config or EnvConfig()
-        self.platform = make_platform(platform) if isinstance(platform, str) else platform
+        self.platform = (
+            make_platform(platform, dispatch_s=self.cfg.dispatch_s)
+            if isinstance(platform, str)
+            else platform
+        )
         self.suppression = suppression or SuppressionModel()
         self.ros_model = ros_model or SimpleROS()
         self.propagator = propagator or CAPropagator(self.ros_model, self.suppression)
@@ -110,6 +118,9 @@ class FireEnv:
                 pos[..., 1:2] / w * 2 - 1,
                 (self.platform.load / self.platform.spec.capacity_l).unsqueeze(-1),
                 (self.platform.cooldown / self.platform.spec.reload_s).unsqueeze(-1),
+                # Without this a policy cannot tell why its drops do nothing
+                # before dispatch. 1 -> not yet on station, 0 -> free to drop.
+                self.platform.dispatch_fraction(self.state).unsqueeze(-1),
             ],
             dim=-1,
         )

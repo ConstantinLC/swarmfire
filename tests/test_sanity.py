@@ -233,6 +233,25 @@ def test_platform_runs_out_and_reloads():
     assert env.platform.load.max().item() > 0, "platform never refilled"
 
 
+def test_nothing_is_dropped_before_dispatch():
+    dispatch = 600.0
+    env = FireEnv(
+        "helicopter",
+        config=EnvConfig(batch=1, grid=(48, 48), device=DEVICE, dt=4.0, dispatch_s=dispatch),
+    )
+    env.reset()
+    always_drop = torch.zeros(1, 1, 3)
+    always_drop[..., 2] = 1.0
+
+    for _ in range(int(dispatch / env.cfg.dt)):
+        env.step(always_drop)
+    assert env.state.water.sum() == 0.0, "water was delivered before dispatch"
+    assert env.platform.load.item() == env.platform.spec.capacity_l, "tank drained while waiting"
+
+    env.step(always_drop)
+    assert env.state.water.sum() > 0.0, "platform never became available"
+
+
 def test_stability_check_flags_a_bad_timestep():
     env = FireEnv(config=EnvConfig(batch=1, grid=(32, 32), wind=(12.0, 0.0), dt=600.0, device=DEVICE))
     env.reset()

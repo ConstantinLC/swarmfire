@@ -34,7 +34,7 @@ def make_gym_env(platform: str = "helicopter", config: EnvConfig | None = None):
             self.observation_space = spaces.Dict(
                 {
                     "grid": spaces.Box(-np.inf, np.inf, (len(OBS_LAYERS), h, w), np.float32),
-                    "fleet": spaces.Box(-np.inf, np.inf, (n, 4), np.float32),
+                    "fleet": spaces.Box(-np.inf, np.inf, (n, 5), np.float32),
                 }
             )
             self.action_space = spaces.Box(-1.0, 1.0, (n, a), np.float32)

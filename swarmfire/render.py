@@ -41,6 +41,45 @@ def _blend(base: np.ndarray, color: np.ndarray, alpha: np.ndarray) -> np.ndarray
     return base * (1 - a) + color * a
 
 
+def draw_platforms(
+    img: np.ndarray,
+    positions: Tensor,
+    load_fraction: Tensor | None = None,
+    upscale: int = 1,
+    size: int = 2,
+    index: int = 0,
+) -> np.ndarray:
+    """Mark each vehicle on an RGB `uint8` frame, in place.
+
+    Without this you only see a platform when it drops, which makes the
+    reload cycle invisible - the fleet appears to teleport between splashes.
+    Markers are drawn as crosses on a dark halo so they stay legible over
+    flame, and dimmed in proportion to remaining load, so a vehicle fades as
+    it empties and brightens when it refills.
+
+    `positions` is `[B, N, 2]` in (y, x) cells; `upscale` must match the zoom
+    already applied to `img`.
+    """
+    pos = positions[index].detach().cpu().numpy()
+    if load_fraction is None:
+        loads = np.ones(len(pos))
+    else:
+        loads = load_fraction[index].detach().cpu().numpy().clip(0.0, 1.0)
+
+    h, w = img.shape[:2]
+    for (y, x), load in zip(pos, loads):
+        cy, cx = int(round(float(y) * upscale)), int(round(float(x) * upscale))
+        brightness = 0.35 + 0.65 * float(load)
+        for radius, colour in ((size + 1, np.zeros(3)), (size, np.full(3, 255 * brightness))):
+            ys = slice(max(cy - radius, 0), min(cy + radius + 1, h))
+            xs = slice(max(cx - radius, 0), min(cx + radius + 1, w))
+            if 0 <= cx < w:
+                img[ys, cx] = colour
+            if 0 <= cy < h:
+                img[cy, xs] = colour
+    return img
+
+
 def save_png(state: FireState, path: str | Path, index: int = 0) -> Path:
     import matplotlib
 
@@ -65,7 +104,8 @@ def save_gif(frames: list[Tensor], path: str | Path, index: int = 0, stride: int
 
     path = Path(path)
     imgs = [(composite(f, index) * 255).astype(np.uint8) for f in frames[::stride]]
-    imageio.mimsave(path, imgs, fps=fps)
+    # imageio >= 2.28 dropped `fps` for the pillow plugin; `duration` is in ms.
+    imageio.mimsave(path, imgs, duration=1000.0 / fps, loop=0)
     return path
 
 

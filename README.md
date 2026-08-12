@@ -8,6 +8,28 @@ The current dynamics are a simple Rothermel Rate-Of-Spead fire propagation model
 
 This is a baseground for the development of an optimal automatic drone-based wildfire response, with the target of being operational on real events.
 
+## Visualization 
+
+![Alt Text](/mnt/SSD2/constantin/swarm-wildfire/out/comparison.gif)
+
+## How to get the code running ?
+
+```bash
+pip install -e ".[viz,dev]"
+python scripts/demo.py --device cuda
+pytest
+```
+
+```python
+from swarmfire import FireEnv, EnvConfig
+
+env = FireEnv("drone_swarm", config=EnvConfig(batch=256, grid=(192, 192), device="cuda"))
+env.reset()
+print(env.rollout()["burned_ha"].mean())   # unsuppressed baseline
+```
+
+## Related work
+
 This work is a proposition to bridge different (currently isolated) aspects of wildfire mitigation models, in order to discover optimal wildfire response strategies. In the next table, we make an inventory of existing works :
 
 | work | fire spread model | suppressant → fire coupling | delivery / platform realism | learned or optimised strategy | differentiable | batched · GPU | code available |
@@ -55,25 +77,7 @@ model for extending `platforms.py` beyond three generic classes.
 ([arXiv:2606.13633](https://arxiv.org/abs/2606.13633)) — full entries in
 [`litterature.md`](litterature.md).
 
-Built to the plan in [`goals.md`](goals.md): get the pipeline working on simple
-fire and water dynamics first, but with every seam already in place for the
-realistic version.
-
-```bash
-pip install -e ".[viz,dev]"
-python scripts/demo.py --device cuda
-pytest
-```
-
-```python
-from swarmfire import FireEnv, EnvConfig
-
-env = FireEnv("drone_swarm", config=EnvConfig(batch=256, grid=(192, 192), device="cuda"))
-env.reset()
-print(env.rollout()["burned_ha"].mean())   # unsuppressed baseline
-```
-
-## The three design decisions
+## Realistic Design Decisions
 
 **Fire state is continuous, not a burning/not-burning flag.** Every gate in the
 physics is smooth, so gradients survive hundreds of fire steps. You can
@@ -130,7 +134,7 @@ and how fast the delivery point moves.
 | | capacity | footprint | reload | agent |
 |---|---|---|---|---|
 | tanker | 12,000 L | 300 × 30 m line | 30 min | retardant |
-| helicopter | 3,000 L | 25 m disc | 5 min | water |
+| helicopter | 3,000 L | 25 m disc | 10 min | water |
 | drone swarm | 32 × 20 L | 6 m discs | 2 min | water |
 
 Footprints are built from continuous coordinates with soft edges, so they are
@@ -157,7 +161,11 @@ Nothing else in the package moves.
   calibrated values. Numbers out of this model are not predictions.
 - Explicit propagation is conditionally stable. `env.check_stability()` returns
   the largest safe `dt`; call it after changing wind, fuel, or resolution.
-- Reload and empty-tank gates are hard (non-differentiable) by nature. Drop
-  position, heading, volume, and all of the physics are smooth.
+- Reload, empty-tank and dispatch gates are hard (non-differentiable) by
+  nature. Drop position, heading, volume, and all of the physics are smooth.
+- `EnvConfig.dispatch_s` holds the fleet on the ground for the first
+  `dispatch_s` seconds - detection, reporting and the flight out - so the fire
+  burns unopposed however good the policy is. It defaults to 0; a real initial
+  attack is tens of minutes.
 - No crown fire, no spotting, no fire-atmosphere feedback. Those belong with
   the Rothermel work.

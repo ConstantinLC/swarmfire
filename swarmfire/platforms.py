@@ -101,6 +101,10 @@ class PlatformSpec:
         timing matters at all.
     cruise_ms : how fast the delivery point can move between drops, m/s.
     agent : "water" or "retardant".
+    dispatch_s : seconds after ignition before this platform may release. It
+        covers detection, reporting and the flight out from base - the fire
+        burns unopposed for this long however good the policy is. Like reload,
+        it is a hard gate rather than a smooth one.
     """
 
     name: str
@@ -109,10 +113,11 @@ class PlatformSpec:
     cruise_ms: float
     agent: str
     n_agents: int = 1
+    dispatch_s: float = 0.0
 
 
 TANKER = PlatformSpec("tanker", capacity_l=12_000, reload_s=1800, cruise_ms=130, agent="retardant")
-HELICOPTER = PlatformSpec("helicopter", capacity_l=3_000, reload_s=300, cruise_ms=50, agent="water")
+HELICOPTER = PlatformSpec("helicopter", capacity_l=3_000, reload_s=600, cruise_ms=50, agent="water")
 DRONE_SWARM = PlatformSpec(
     "drone_swarm", capacity_l=20, reload_s=120, cruise_ms=20, agent="water", n_agents=32
 )
@@ -160,6 +165,19 @@ class Platform(ABC):
         self.load = self.load.detach()
         self.cooldown = self.cooldown.detach()
 
+    # ---- availability
+
+    def on_station(self, state: FireState) -> Tensor:
+        """`[B, N]` 1 where the platform may release, 0 before `dispatch_s`."""
+        return (state.t.view(-1, 1) >= self.spec.dispatch_s).expand(-1, self.spec.n_agents)
+
+    def dispatch_fraction(self, state: FireState) -> Tensor:
+        """`[B, N]` share of the dispatch delay still to run, 1 -> 0."""
+        if self.spec.dispatch_s <= 0:
+            return torch.zeros_like(self.load)
+        remaining = (self.spec.dispatch_s - state.t).clamp(min=0.0) / self.spec.dispatch_s
+        return remaining.view(-1, 1).expand(-1, self.spec.n_agents)
+
     # ---- footprint, supplied by subclasses
 
     @abstractmethod
@@ -190,6 +208,11 @@ class Platform(ABC):
         ready = 1.0 - (self.cooldown / max(dt, 1e-6)).clamp(0.0, 1.0)
         volume = self.spec.capacity_l * intent * ready
         volume = torch.minimum(volume, self.load)
+
+        # Nothing leaves the tank before the fire is reported and the platform
+        # is on station. The tank does not drain and the reload clock does not
+        # start, so the fleet arrives full.
+        volume = volume * self.on_station(state).to(volume.dtype)
 
         self.load = self.load - volume
         # The release gate is soft, so a full-commit drop leaves a sliver in the
