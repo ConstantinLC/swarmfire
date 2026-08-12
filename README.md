@@ -10,7 +10,17 @@ This is a baseground for the development of an optimal automatic drone-based wil
 
 ## Visualization 
 
-![Alt Text](/mnt/SSD2/constantin/swarm-wildfire/out/comparison.gif)
+![Free burn, helicopter and drone swarm on the same ignition](out/comparison.gif)
+
+The same fire under three regimes, sharing one ignition and one clock: grass,
+wind (5, 2) m/s, 192 × 192 cells at 30 m, 2.8 hours. The fleet is grounded for
+the first ten minutes (`dispatch_s = 600`), so all three panels are identical
+until it launches. The white cross is the vehicle, dimming as its tank empties
+and brightening on reload. Regenerate with:
+
+```bash
+python scripts/suppression_study.py compare --dispatch 600 --upscale 2 --record-every 20
+```
 
 ## How to get the code running ?
 
