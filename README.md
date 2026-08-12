@@ -4,6 +4,35 @@ Differentiable, GPU-batched wildfire propagation with suppressant dynamics, and
 a platform abstraction for delivering that suppressant under realistic
 operational constraints.
 
+The current dynamics are a simple Rothermel Rate-Of-Spead fire propagation model, with simple moisture accumulation mechanisms for fire suppression. The goal is to progressively increment to more and more realistic simulations, while allowing for learnt aircraft strategies.
+
+This is a baseground for the development of an optimal automatic drone-based wildfire response, with the target of being operational on real events.
+
+This work is a proposition to bridge different (currently isolated) aspects of wildfire mitigation models, in order to discover optimal wildfire response strategies. In the next table, we make an inventory of existing works :
+
+| work | fire spread model | suppressant → fire coupling | delivery / platform realism | learned or optimised strategy | differentiable | batched · GPU | code available |
+|---|---|---|---|---|---|---|---|
+| Dada & Barakos 2025 — real-time CFD of aerial firefighting [1] | ✗ | ✗ | ✓ resolved drop breakup and fall | ✗ (pilot training) | ✗ | ✗ | ✗ |
+| Plucinski & Sullivan 2024 — combustion wind tunnel [2] | ◐ bench-scale flame spread | ✓ measured, direct *and* indirect attack | ✗ (applied by hand) | ✗ | ✗ | ✗ | n/a (experimental) |
+| Lovellette — AT-802 ground pattern guide [3] | ✗ | ✗ | ✓ measured coverage-level footprints | ✗ | ✗ | ✗ | n/a (field data) |
+| Martins et al. 2026 — water drops on wildfire spread [4] | ✓ | ✓ | ◐ drop as a prescribed footprint | ✗ | ✗ | ✗ | ? |
+| **swarmfire (this work)** | ✓ smooth CA, Rothermel-shaped ROS | ✓ through fuel moisture, water *and* retardant | ✓ capacity, footprint, reload, transit | ◐ RL + gradient interfaces ready, no trained policy yet | ✓ end-to-end through hundreds of steps | ✓ `[B,H,W]` tensor ops | ✓ |
+
+✓ does it · ◐ partially · ✗ does not · ? not established from the source
+
+Each existing work is excellent at one column and silent on the others: the
+drop is modelled without the fire, the fire without the aircraft, and the
+suppressant chemistry without either. Nothing in that list produces a gradient
+or a strategy. This repository is the attempt to close that loop — an
+environment where a controller can be *trained*, with each column swappable for
+the higher-fidelity version the corresponding paper already provides. The
+calibration targets are [2] and [3]; [4] is the closest prior art on the
+coupling itself.
+
+[1] `dada2025real` · [2] `plucinski2024methodologies` · [3] Lovellette, USDA
+Forest Service · [4] `martins2026beyond` — full entries in
+[`litterature.md`](litterature.md).
+
 Built to the plan in [`goals.md`](goals.md): get the pipeline working on simple
 fire and water dynamics first, but with every seam already in place for the
 realistic version.
