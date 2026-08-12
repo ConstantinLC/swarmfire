@@ -13,25 +13,36 @@ This work is a proposition to bridge different (currently isolated) aspects of w
 | work | fire spread model | suppressant → fire coupling | delivery / platform realism | learned or optimised strategy | differentiable | batched · GPU | code available |
 |---|---|---|---|---|---|---|---|
 | Dada & Barakos 2025 — real-time CFD of aerial firefighting [1] | ✗ | ✗ | ✓ resolved drop breakup and fall | ✗ (pilot training) | ✗ | ✗ | ✗ |
-| Plucinski & Sullivan 2024 — combustion wind tunnel [2] | ◐ bench-scale flame spread | ✓ measured, direct *and* indirect attack | ✗ (applied by hand) | ✗ | ✗ | ✗ | n/a (experimental) |
-| Lovellette — AT-802 ground pattern guide [3] | ✗ | ✗ | ✓ measured coverage-level footprints | ✗ | ✗ | ✗ | n/a (field data) |
-| Martins et al. 2026 — water drops on wildfire spread [4] | ✓ | ✓ | ◐ drop as a prescribed footprint | ✗ | ✗ | ✗ | ? |
+| Calbrix et al. 2023 — CFD drops, CL-415 and Dash-8 [2] | ✗ | ✗ | ✓ per-airframe drop simulation | ✗ | ✗ | ✗ | ✗ |
+| Wu et al. 2024 — review of airtanker drop characteristics [3] | ✗ | ◐ surveys effectiveness studies | ✓ survey of drop patterns | ✗ | ✗ | ✗ | n/a (review) |
+| Lovellette — AT-802 ground pattern guide [4] | ✗ | ✗ | ✓ measured coverage-level footprints | ✗ | ✗ | ✗ | n/a (field data) |
+| Plucinski & Sullivan 2024 — combustion wind tunnel [5] | ◐ bench-scale flame spread | ✓ measured, direct *and* indirect attack | ✗ (applied by hand) | ✗ | ✗ | ✗ | n/a (experimental) |
+| Martins et al. 2026 — water drops on wildfire spread [6] | ✓ | ✓ | ◐ drop as a prescribed footprint | ✗ | ✗ | ✗ | ? |
+| Murray et al. 2024 — deep RL for firebreak placement [7] | ✓ | ✗ (firebreaks, not suppressant) | ✗ (no platform, no logistics) | ✓ trained DRL policy | ✗ (RL through a black-box sim) | ◐ | ? |
+| Matei et al. — differentiable tactical optimisation of aerial suppression [8] | ✓ | ✓ | ✓ aircraft tactics and drops | ✓ gradient-based tactical optimisation | ✓ | ? | ? |
 | **swarmfire (this work)** | ✓ smooth CA, Rothermel-shaped ROS | ✓ through fuel moisture, water *and* retardant | ✓ capacity, footprint, reload, transit | ◐ RL + gradient interfaces ready, no trained policy yet | ✓ end-to-end through hundreds of steps | ✓ `[B,H,W]` tensor ops | ✓ |
 
 ✓ does it · ◐ partially · ✗ does not · ? not established from the source
 
-Each existing work is excellent at one column and silent on the others: the
-drop is modelled without the fire, the fire without the aircraft, and the
-suppressant chemistry without either. Nothing in that list produces a gradient
-or a strategy. This repository is the attempt to close that loop — an
-environment where a controller can be *trained*, with each column swappable for
-the higher-fidelity version the corresponding paper already provides. The
-calibration targets are [2] and [3]; [4] is the closest prior art on the
-coupling itself.
+Most of these works are excellent in one column and silent on the rest: [1–4]
+model the drop without the fire, [5] the suppressant chemistry without either,
+[6] the coupling without an aircraft or a controller. [7] trains a policy, but
+over firebreaks rather than suppressant and through a non-differentiable
+simulator.
 
-[1] `dada2025real` · [2] `plucinski2024methodologies` · [3] Lovellette, USDA
-Forest Service · [4] `martins2026beyond` — full entries in
-[`litterature.md`](litterature.md).
+[8] is the genuine neighbour of this work — differentiable, aerial, and
+optimising suppression tactics — and any claim made here should be read against
+it. What this repository adds is scale and scope rather than the core idea: many
+environments stepped as one batched tensor op, three platform classes with
+capacity, footprint and reload logistics, water and retardant separated by
+persistence through a single moisture pathway, an amortised policy rather than
+per-scenario optimisation, and open code. The calibration targets are [4] and
+[5]; the fidelity upgrades come from [1], [2] and [6].
+
+[1] `dada2025real` · [2] `calbrix2023numerical` · [3] `wu2024review` ·
+[4] Lovellette, USDA Forest Service · [5] `plucinski2024methodologies` ·
+[6] `martins2026beyond` · [7] `murray2024advancing` · [8] `mateidifferentiable`
+— full entries in [`litterature.md`](litterature.md).
 
 Built to the plan in [`goals.md`](goals.md): get the pipeline working on simple
 fire and water dynamics first, but with every seam already in place for the
