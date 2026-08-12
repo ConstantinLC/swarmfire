@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmfire"
+version = "0.1.0"
+description = "Differentiable, GPU-batched wildfire propagation and suppression"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.22",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.6", "imageio>=2.30"]
+gym = ["gymnasium>=0.29"]
+# Reference implementation to validate RothermelROS against, plus real fuel data.
+real = ["pyretechnics", "landfire", "rasterio"]
+dev = ["pytest>=7", "pytest-xdist"]
+
+[tool.setuptools.packages.find]
+include = ["swarmfire*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
