@@ -19,8 +19,8 @@ This work is a proposition to bridge different (currently isolated) aspects of w
 | Plucinski & Sullivan 2024 — combustion wind tunnel [5] | ◐ bench-scale flame spread | ✓ measured, direct *and* indirect attack | ✗ (applied by hand) | ✗ | ✗ | ✗ | n/a (experimental) |
 | Martins et al. 2026 — water drops on wildfire spread [6] | ✓ | ✓ | ◐ drop as a prescribed footprint | ✗ | ✗ | ✗ | ? |
 | Murray et al. 2024 — deep RL for firebreak placement [7] | ✓ | ✗ (firebreaks, not suppressant) | ✗ (no platform, no logistics) | ✓ trained DRL policy | ✗ (RL through a black-box sim) | ◐ | ? |
-| Matei et al. — differentiable tactical optimisation of aerial suppression [8] | ✓ | ✓ | ✓ aircraft tactics and drops | ✓ gradient-based tactical optimisation | ✓ | ? | ? |
-| **swarmfire (this work)** | ✓ smooth CA, Rothermel-shaped ROS | ✓ through fuel moisture, water *and* retardant | ✓ capacity, footprint, reload, transit | ◐ RL + gradient interfaces ready, no trained policy yet | ✓ end-to-end through hundreds of steps | ✓ `[B,H,W]` tensor ops | ✓ |
+| Matei et al. 2026 — aerial suppression planning, hybrid CNN–CA [8] | ◐ frozen CNN emits the CA's parameters | ◐ water *and* retardant, but multiplied onto a surrogate never trained on drops | ✓ 18-airframe fleet, real capacities and turnaround | ◐ 3,000 Adam steps per scenario, no policy | ✓ | ◐ vectorised over 300 MC samples | ✗ |
+| **swarmfire (this work)** | ✓ explicit smooth CA, Rothermel-shaped ROS | ✓ through fuel moisture against moisture of extinction | ◐ three generic classes: capacity, footprint, reload, transit | ◐ RL + gradient interfaces ready, no trained policy yet | ✓ end-to-end through hundreds of steps | ✓ `[B,H,W]` tensor ops | ✓ |
 
 ✓ does it · ◐ partially · ✗ does not · ? not established from the source
 
@@ -30,19 +30,30 @@ model the drop without the fire, [5] the suppressant chemistry without either,
 over firebreaks rather than suppressant and through a non-differentiable
 simulator.
 
-[8] is the genuine neighbour of this work — differentiable, aerial, and
-optimising suppression tactics — and any claim made here should be read against
-it. What this repository adds is scale and scope rather than the core idea: many
-environments stepped as one batched tensor op, three platform classes with
-capacity, footprint and reload logistics, water and retardant separated by
-persistence through a single moisture pathway, an amortised policy rather than
-per-scenario optimisation, and open code. The calibration targets are [4] and
-[5]; the fidelity upgrades come from [1], [2] and [6].
+[8] is the nearest neighbour of this work and the honest benchmark for it. It is
+*ahead* of this repository on operational realism — an eighteen-airframe fleet
+with real capacities and turnaround times, a real fire (the 2020 Bear Fire) on
+real terrain, and explicit aleatoric and epistemic uncertainty — and it already
+separates the two agents, water scaling the current burning probability and
+retardant decaying a persistent fuel field.
+
+Three things remain different here. Its fire model is a frozen CNN that emits the
+parameters of a cellular automaton, trained without suppression in the data, so
+the drop is multiplied onto dynamics that never saw one; in this repository
+suppressant raises fuel moisture and the fire stops where moisture passes the
+fuel's moisture of extinction — a mechanism already inside the spread model, and
+therefore calibratable against [4] and [5] rather than assumed, and inspectable
+cell by cell against a reference implementation. Its optimiser runs three
+thousand Adam steps per scenario over drop poses; this environment is built to
+train one amortised policy that generalises across fires. And its code is not
+released. Fidelity upgrades come from [1], [2] and [6]; the fleet in [8] is the
+model for extending `platforms.py` beyond three generic classes.
 
 [1] `dada2025real` · [2] `calbrix2023numerical` · [3] `wu2024review` ·
 [4] Lovellette, USDA Forest Service · [5] `plucinski2024methodologies` ·
 [6] `martins2026beyond` · [7] `murray2024advancing` · [8] `mateidifferentiable`
-— full entries in [`litterature.md`](litterature.md).
+([arXiv:2606.13633](https://arxiv.org/abs/2606.13633)) — full entries in
+[`litterature.md`](litterature.md).
 
 Built to the plan in [`goals.md`](goals.md): get the pipeline working on simple
 fire and water dynamics first, but with every seam already in place for the
