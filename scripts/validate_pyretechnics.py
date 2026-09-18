@@ -102,73 +102,181 @@ def coefficients(args) -> None:
 # ------------------------------------------------------------------ point physics
 
 
+# Every point-physics comparison runs on this grid, for both ROS models, so the
+# two are measured the same way. Only the three fuels both can express appear
+# here; `rothermel` mode extends to all 53 for the model that supports them.
+MOISTURES = (0.04, 0.06, 0.09, 0.18)
+COMBOS = (
+    (0.0, 0.0), (1.0, 0.0), (3.0, 0.0), (6.0, 0.0), (12.0, 0.0), (20.0, 0.0),
+    (0.0, 0.2), (0.0, 0.5), (2.0, 0.2), (3.0, 0.3), (6.0, 0.5), (15.0, 0.3),
+)
+NOMINAL_MOISTURE = 0.06  # what the presets were implicitly written for
+
+
+def _sweep(args, build, ros_model, fuel_model, moistures):
+    """Relative error against the reference over the common grid.
+
+    `build(moisture, wind, slope)` returns the `FireState` to evaluate, so the
+    same sweep drives `SimpleROS` on a preset world and `RothermelROS` on a
+    fuel-model world without either being given an advantage.
+
+    Returns one relative error per direction per case. Cases where the
+    reference says the fuel cannot carry fire at all are dropped: both models
+    agree on zero there and the ratio is meaningless.
+    """
+    errors: list[float] = []
+    for moisture in moistures:
+        scenario = {**args.moisture, "dead_1hr": moisture}
+        for wind, slope in COMBOS:
+            state = build(moisture, wind, slope)
+            mine = ros_model(state)[0, :, 2, 2].detach().cpu().numpy()
+            theirs = V.rothermel_directional(fuel_model, wind, slope, scenario)
+            if theirs.max() < 1e-6:
+                continue
+            errors.extend((np.abs(mine - theirs) / np.maximum(theirs, 1e-9)).tolist())
+    return np.array(errors)
+
+
+def _builders(args, preset, fuel_model):
+    """The two worlds, built the way the package actually builds them."""
+
+    def simple(moisture, wind, slope):
+        state = uniform_world(
+            batch=1, grid=(5, 5), preset=preset, cell_size=30.0,
+            wind=(wind, 0.0), slope=(slope, 0.0), device="cpu",
+        )
+        return state.replace(moisture=torch.full_like(state.moisture, moisture))
+
+    def rothermel_(moisture, wind, slope):
+        return rothermel_world(
+            grid=(5, 5), fuel_model=fuel_model, moisture=moisture, cell_size=30.0,
+            wind=(wind, 0.0), slope=(slope, 0.0), device="cpu",
+            ros_model=_rothermel(args),
+        )
+
+    return simple, rothermel_
+
+
 def ros(args) -> None:
-    """Head rate of spread and fire shape, with no propagation involved."""
-    rows: dict[str, np.ndarray] = {}
+    """Both ROS models against the reference, on one grid and one metric."""
+    ros_simple, ros_real = SimpleROS(), _rothermel(args)
 
-    _rule("Head rate of spread vs midflame wind, flat ground (m/s)")
-    print(f"{'preset':8} {'U m/s':>7} {'swarmfire':>11} {'rothermel':>11} {'ratio':>7}")
-    for preset, fuel_model in V.FUEL_EQUIVALENTS.items():
-        sw, rf = [], []
-        for u in WINDS:
-            state = uniform_world(batch=1, grid=(8, 8), preset=preset, wind=(u, 0.0))
-            sw.append(V.swarmfire_head_ros(SimpleROS(), state))
-            rf.append(V.rothermel_point(fuel_model, u, 0.0, args.moisture).head_ros)
-        for u, a, b in zip(WINDS, sw, rf):
-            print(f"{preset:8} {u:7.1f} {a:11.4f} {b:11.4f} {a / b:7.2f}")
-        rows[preset] = np.array([sw, rf])
-        print()
-
-    _rule("Head rate of spread vs slope, no wind (m/s), grass / GR2")
-    print(f"{'tan phi':>8} {'swarmfire':>11} {'rothermel':>11} {'ratio':>7}")
-    slope_sw, slope_rf = [], []
-    for s in SLOPES:
-        state = uniform_world(batch=1, grid=(8, 8), preset="grass", wind=(0.0, 0.0), slope=(s, 0.0))
-        a = V.swarmfire_head_ros(SimpleROS(), state)
-        b = V.rothermel_point(V.FUEL_EQUIVALENTS["grass"], 0.0, s, args.moisture).head_ros
-        slope_sw.append(a)
-        slope_rf.append(b)
-        print(f"{s:8.2f} {a:11.4f} {b:11.4f} {a / b:7.2f}")
-
-    _rule("Ellipse length/breadth vs midflame wind")
+    _rule("Directional rate of spread vs the reference, same grid for both models")
     print(
-        "Both use Anderson (1983); swarmfire's coefficients are the same numbers\n"
-        "in m/s that pyretechnics carries in mph. They agree exactly until\n"
-        "Rothermel's effective-wind cap bites, which swarmfire does not have.\n"
+        f"{len(V.FUEL_EQUIVALENTS)} fuels x {len(MOISTURES)} dead 1-h moistures"
+        f" x {len(COMBOS)} wind/slope combinations x 8 directions.\n"
+        "Relative error against pyretechnics; lower is better.\n"
     )
-    print(f"{'U m/s':>7} {'swarmfire':>11} {'rothermel':>11}")
-    for u in (0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 8.0, 12.0):
-        a = float(length_to_breadth(torch.tensor(u)))
-        b = V.rothermel_point(V.FUEL_EQUIVALENTS["grass"], u, 0.0, args.moisture).length_to_breadth
-        print(f"{u:7.1f} {a:11.3f} {b:11.3f}")
+    header = f"{'fuel':16} {'model':12} {'cases':>6} {'median':>9} {'90th pct':>10} {'max':>9}"
+    print(header)
+    print("-" * len(header))
+    for preset, fuel_model in V.FUEL_EQUIVALENTS.items():
+        label = f"{preset} / FM{fuel_model}"
+        simple_build, real_build = _builders(args, preset, fuel_model)
+        for name, model, build in (
+            ("SimpleROS", ros_simple, simple_build),
+            ("RothermelROS", ros_real, real_build),
+        ):
+            e = _sweep(args, build, model, fuel_model, MOISTURES)
+            print(
+                f"{label:16} {name:12} {len(e):>6}"
+                f" {np.median(e):>9.2e} {np.percentile(e, 90):>10.2e} {e.max():>9.2e}"
+            )
+        label = ""
+    print(
+        "\nThat sweep varies fuel moisture, and `SimpleROS` has no moisture term\n"
+        "at all - `ros/simple.py` never reads `state.moisture`. To be sure the\n"
+        "comparison is not simply punishing it for an axis it does not model,\n"
+        f"here is the same metric with moisture pinned at {NOMINAL_MOISTURE:.0%}, which is what\n"
+        "the presets were implicitly written for:\n"
+    )
+    print(header)
+    print("-" * len(header))
+    for preset, fuel_model in V.FUEL_EQUIVALENTS.items():
+        label = f"{preset} / FM{fuel_model}"
+        simple_build, real_build = _builders(args, preset, fuel_model)
+        for name, model, build in (
+            ("SimpleROS", ros_simple, simple_build),
+            ("RothermelROS", ros_real, real_build),
+        ):
+            e = _sweep(args, build, model, fuel_model, (NOMINAL_MOISTURE,))
+            print(
+                f"{label:16} {name:12} {len(e):>6}"
+                f" {np.median(e):>9.2e} {np.percentile(e, 90):>10.2e} {e.max():>9.2e}"
+            )
+        label = ""
+
+    _rule("What SimpleROS does with fuel moisture (grass / FM102, 3 m/s, flat)")
+    print(f"{'dead 1-h moisture':>18} {'SimpleROS':>11} {'RothermelROS':>13} {'reference':>11}")
+    simple_build, real_build = _builders(args, "grass", 102)
+    for moisture in (0.03, 0.06, 0.12, 0.20):
+        a = float(ros_simple(simple_build(moisture, 3.0, 0.0))[0, 4, 2, 2])
+        b = float(ros_real(real_build(moisture, 3.0, 0.0))[0, 4, 2, 2])
+        reference = V.rothermel_point(
+            102, 3.0, 0.0, {**args.moisture, "dead_1hr": moisture}
+        ).head_ros
+        print(f"{moisture:>18.2f} {a:>11.5f} {b:>13.5f} {reference:>11.5f}")
+    print(
+        "\nGR2's dead moisture of extinction is 15%. Past it the fuel cannot carry\n"
+        "fire and the reference goes to zero; SimpleROS returns the same number it\n"
+        "returns for bone-dry grass. Suppression therefore cannot act through the\n"
+        "spread model at all under SimpleROS - only through the separate\n"
+        "flammability gate in `SuppressionModel` - which is the mechanism the\n"
+        "README describes and RothermelROS is the first model to actually provide."
+    )
 
     if args.plot:
-        _plot_ros(rows, np.array([slope_sw, slope_rf]))
+        _plot_ros(args, ros_simple, ros_real)
 
 
-def _plot_ros(wind_rows, slope_rows) -> None:
+def _plot_ros(args, ros_simple, ros_real) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 4, figsize=(17, 3.8))
-    for ax, (preset, arr) in zip(axes, wind_rows.items()):
-        ax.plot(WINDS, arr[0], "o-", label="swarmfire SimpleROS")
-        ax.plot(WINDS, arr[1], "s-", label="pyretechnics Rothermel")
-        ax.set_title(f"{preset} / FM{V.FUEL_EQUIVALENTS[preset]}")
+    winds = (0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0)
+    fig, axes = plt.subplots(1, 4, figsize=(17, 3.9))
+    for ax, (preset, fuel_model) in zip(axes, V.FUEL_EQUIVALENTS.items()):
+        simple_build, real_build = _builders(args, preset, fuel_model)
+        a = [float(ros_simple(simple_build(NOMINAL_MOISTURE, u, 0.0))[0, 4, 2, 2]) for u in winds]
+        b = [float(ros_real(real_build(NOMINAL_MOISTURE, u, 0.0))[0, 4, 2, 2]) for u in winds]
+        r = [
+            V.rothermel_point(fuel_model, u, 0.0, args.moisture).head_ros for u in winds
+        ]
+        ax.plot(winds, r, "-", color="0.35", lw=6, alpha=0.30, solid_capstyle="round",
+                label="pyretechnics")
+        ax.plot(winds, b, "o-", ms=4, label="RothermelROS")
+        ax.plot(winds, a, "s--", ms=4, label="SimpleROS")
+        ax.set_title(f"{preset} / FM{fuel_model}", fontsize=10)
         ax.set_xlabel("midflame wind (m/s)")
         ax.set_ylabel("head ROS (m/s)")
         ax.set_yscale("log")
         ax.grid(alpha=0.3)
     axes[0].legend(fontsize=8)
-    axes[3].plot(SLOPES, slope_rows[0], "o-", label="swarmfire")
-    axes[3].plot(SLOPES, slope_rows[1], "s-", label="pyretechnics")
-    axes[3].set_title("slope, no wind (grass)")
-    axes[3].set_xlabel("tan(slope)")
-    axes[3].set_ylabel("head ROS (m/s)")
-    axes[3].grid(alpha=0.3)
-    axes[3].legend(fontsize=8)
+
+    ax = axes[3]
+    moistures = np.linspace(0.02, 0.22, 21)
+    simple_build, real_build = _builders(args, "grass", 102)
+    ax.plot(
+        moistures,
+        [V.rothermel_point(102, 3.0, 0.0, {**args.moisture, "dead_1hr": m}).head_ros for m in moistures],
+        "-", color="0.35", lw=6, alpha=0.30, solid_capstyle="round",
+    )
+    ax.plot(moistures, [float(ros_real(real_build(m, 3.0, 0.0))[0, 4, 2, 2]) for m in moistures], "o-", ms=4)
+    ax.plot(moistures, [float(ros_simple(simple_build(m, 3.0, 0.0))[0, 4, 2, 2]) for m in moistures], "s--", ms=4)
+    ax.axvline(0.15, color="C3", ls=":", lw=1.0)
+    ax.annotate("moisture of\nextinction", (0.15, 0.22), xytext=(4, 0),
+                textcoords="offset points", fontsize=8, color="C3")
+    ax.set_title("response to fuel moisture\n(grass / FM102, 3 m/s)", fontsize=10)
+    ax.set_xlabel("dead 1-h fuel moisture")
+    ax.set_ylabel("head ROS (m/s)")
+    ax.grid(alpha=0.3)
+
+    fig.suptitle(
+        "RothermelROS sits on the reference (thick grey); SimpleROS does not",
+        fontsize=11,
+    )
     fig.tight_layout()
     path = OUT / "validation_ros.png"
     fig.savefig(path, dpi=130)
@@ -179,68 +287,86 @@ def _plot_ros(wind_rows, slope_rows) -> None:
 
 
 def front(args) -> None:
-    """The propagator alone, with the ROS difference removed.
+    """The propagator alone, with the rate-of-spread difference removed.
 
-    Both codes get Rothermel's directional rates (`validation.matched_world`
-    makes `SimpleROS` reproduce them to float precision), so what is left is
-    the difference between a smooth cellular automaton and a level set.
+    Two independent ways of handing both codes the same directional rates:
+
+    * `RothermelROS`, which reproduces the reference's spread rate directly - to
+      float32, per `rothermel` mode. This is the configuration anyone actually
+      running the package for real numbers would use.
+    * `validation.matched_world`, which gives `SimpleROS` Rothermel's own
+      coefficients for this one fuel and moisture. It predates `RothermelROS`
+      and is kept because it reaches the same conclusion by a different route -
+      if the two swarmfire rows ever disagree, one of them has a bug.
+
+    Whatever is left after that is front tracking, not physics.
     """
     fuel_model = V.FUEL_EQUIVALENTS[args.preset]
     grid = (args.grid, args.grid)
     duration = args.minutes * 60.0
+    moisture = args.moisture["dead_1hr"]
 
-    reference_point = V.rothermel_point(fuel_model, args.wind, 0.0, args.moisture)
+    point = V.rothermel_point(fuel_model, args.wind, 0.0, args.moisture)
     _rule(f"Front geometry, {args.preset} / FM{fuel_model}, {args.wind} m/s midflame, flat")
     print(
         f"grid {grid[0]}x{grid[1]} at {args.cell:g} m, {args.minutes:g} min, dt {args.dt:g} s\n"
-        f"identical directional ROS in both codes: head {reference_point.head_ros:.4f} m/s, "
-        f"L/B {reference_point.length_to_breadth:.2f}\n"
+        f"both codes given the same directional ROS: head {point.head_ros:.4f} m/s, "
+        f"L/B {point.length_to_breadth:.2f}\n"
     )
-    if reference_point.wind_limited:
+    if point.wind_limited:
         print("warning: above Rothermel's effective-wind cap - the two ROS fields differ here\n")
 
-    pyr = V.pyretechnics_arrival_map(
+    reference = V.pyretechnics_arrival_map(
         fuel_model, grid, args.cell, args.wind, duration, moisture=args.moisture
     )
-    pyr_axes = V.axis_spread_rates(pyr, cell_size=args.cell)
+    maps = {"pyretechnics": reference}
 
-    print(f"{'front tracker':34} {'head':>8} {'flank':>8} {'back':>8} {'cells':>7} {'IoU':>6}")
+    real_ros = _rothermel(args)
+    runs = [
+        (
+            "swarmfire CA, RothermelROS",
+            rothermel_world(
+                grid=grid, fuel_model=fuel_model, moisture=moisture, cell_size=args.cell,
+                wind=(args.wind, 0.0), device=args.device, ros_model=real_ros,
+            ),
+            real_ros,
+        ),
+    ]
+    matched_state, matched_ros, _ = V.matched_world(
+        fuel_model, grid, args.cell, (args.wind, 0.0), moisture=args.moisture, device=args.device
+    )
+    runs.append(("swarmfire CA, matched SimpleROS", matched_state, matched_ros))
+
+    print(f"{'front tracker':32} {'head':>9} {'flank':>9} {'back':>9} {'cells':>7} {'IoU':>6}")
+    axes = V.axis_spread_rates(reference, cell_size=args.cell)
     print(
-        f"{'pyretechnics level set':34} {_rate(pyr_axes['head'])} {_rate(pyr_axes['flank'])}"
-        f" {_rate(pyr_axes['back'])} {int(np.isfinite(pyr).sum()):7d} {1.0:6.3f}"
+        f"{'pyretechnics level set':32} {_rate(axes['head'])} {_rate(axes['flank'])}"
+        f" {_rate(axes['back'])} {int(np.isfinite(reference).sum()):7d} {1.0:6.3f}"
+    )
+    prescribed_flank = point.head_ros * (1.0 - point.eccentricity)
+    prescribed_back = point.head_ros * (1.0 - point.eccentricity) / (1.0 + point.eccentricity)
+    print(
+        f"{'  (prescribed by the ROS model)':32} {_rate(point.head_ros)}"
+        f" {_rate(prescribed_flank)} {_rate(prescribed_back)} {'':>7} {'':>6}"
     )
 
-    maps = {"pyretechnics": pyr}
-    variants = [
-        ("swarmfire CA, Rothermel residence", None),
-        (f"swarmfire CA, {args.preset} preset residence", PRESETS[args.preset].residence),
-        ("swarmfire CA, no fuel burnout", 1e9),
-    ]
-    for label, residence in variants:
-        state, ros_model, _ = V.matched_world(
-            fuel_model,
-            grid,
-            args.cell,
-            (args.wind, 0.0),
-            moisture=args.moisture,
-            residence_s=residence,
-            device=args.device,
-        )
-        arrival = V.swarmfire_arrival_map(state, CAPropagator(ros_model), duration, args.dt)
-        axes = V.axis_spread_rates(arrival, cell_size=args.cell)
+    for label, state, model in runs:
+        arrival = V.swarmfire_arrival_map(state, CAPropagator(model), duration, args.dt)
+        a = V.axis_spread_rates(arrival, cell_size=args.cell)
         print(
-            f"{label:34} {_rate(axes['head'])} {_rate(axes['flank'])} {_rate(axes['back'])}"
-            f" {int(np.isfinite(arrival).sum()):7d} {V.iou(arrival, pyr, duration):6.3f}"
+            f"{label:32} {_rate(a['head'])} {_rate(a['flank'])} {_rate(a['back'])}"
+            f" {int(np.isfinite(arrival).sum()):7d} {V.iou(arrival, reference, duration):6.3f}"
         )
         maps[label] = arrival
 
     print(
-        "\nThe three swarmfire rows should be identical: front speed is sourced\n"
-        "from whether a cell has ignited, not from how fast it is consuming fuel,\n"
-        "so burnout time cannot reach it. Head and back land within 6 and 8\n"
-        "percent; the flank runs about a third fast because eight-neighbour\n"
-        "contributions combine with a p-norm rather than along the fastest path,\n"
-        "which is the remaining known defect in this class."
+        "\nThe two swarmfire rows agree, which is the point of running both: the\n"
+        "residual is the front tracker and not the rate-of-spread model. Head\n"
+        "lands about 6 percent low and back 8 percent high; the flank runs about a\n"
+        "third fast, because eight-neighbour contributions combine with a p-norm\n"
+        "rather than along the fastest path. That is the remaining known defect\n"
+        "in this class, and it is what the perimeter figure shows as a fire that\n"
+        "is too fat and too blunt where the reference is a teardrop."
     )
     if args.plot:
         _plot_front(maps, duration, args.cell)
@@ -274,7 +400,7 @@ def _plot_front(maps, duration, cell_size) -> None:
 
     # Perimeters at four times, reference against the best-case CA.
     overlay = axes[-1]
-    best = max(maps.items(), key=lambda kv: np.isfinite(kv[1]).sum() if "swarmfire" in kv[0] else -1)
+    best = next((kv for kv in maps.items() if "Rothermel" in kv[0]), list(maps.items())[-1])
     for minutes in (duration / 60.0 * f for f in (0.25, 0.5, 0.75, 1.0)):
         overlay.contour(
             maps["pyretechnics"][y0:y1, x0:x1] / 60.0, levels=[minutes], colors="k", linewidths=1.1

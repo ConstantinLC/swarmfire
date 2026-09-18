@@ -49,44 +49,104 @@ What is left is the front tracker rather than the physics — §2.
 
 ## Why the comparison is split in two
 
-An under-propagating front and an over-fast ROS produce the same burned-area
-curve as a correct simulator. So the two are measured separately:
+An under-propagating front and an over-fast rate of spread produce the same
+burned-area curve as a correct simulator. So the two are measured separately:
 
-1. **Point physics.** Does `SimpleROS` return the rate of spread Rothermel
-   returns, for the same fuel, moisture, midflame wind and slope? A question
-   about `ros/` only.
-2. **Front geometry.** Given *identical* directional rate-of-spread fields, does
-   `CAPropagator` move the front at that rate, into the right shape? A question
-   about `propagate.py` only — and the one that survives replacing `SimpleROS`
-   with a real Rothermel model.
+1. **Point physics (§1).** Does the ROS model return the rate of spread
+   Rothermel returns, for the same fuel, moisture, midflame wind and slope? A
+   question about `ros/` only.
+2. **Front geometry (§2).** Given rates that already match, does `CAPropagator`
+   move the front at them, and into the right shape? A question about
+   `propagate.py` only.
 
-`validation.matched_world` is what separates them. Rothermel's wind factor is
-`φ_w = C(β/β_op)^−E · U^B` and its slope factor is `φ_s = G·tan²φ` — exactly the
-algebraic form `SimpleROS` already uses. Give `SimpleROS` Rothermel's own
-coefficients for one fuel and one moisture state and the two agree to float
-precision (asserted in `tests/test_validation.py`). Propagate that, and whatever
-disagreement is left belongs to the propagator.
+The second needs both codes driven by identical rates, and there are now two
+independent ways to arrange that. `RothermelROS` reproduces the reference's
+rates directly. `validation.matched_world` gets there differently: Rothermel's
+wind factor is `φ_w = C(β/β_op)^−E · U^B` and its slope factor `φ_s = G·tan²φ` —
+exactly the algebraic form `SimpleROS` already uses — so handing `SimpleROS`
+Rothermel's own coefficients for one fuel and one moisture state makes the two
+agree to float precision (asserted in `tests/test_validation.py`).
 
-## 1. Point physics
+§2 runs both. They should give the same answer, and if they ever stop, one of
+them has a bug.
 
-Two rate-of-spread models now live behind the `ROSModel` seam, and they are in
-very different places. §1.1 is `RothermelROS`, which agrees with the reference to
-float32. §1.2 is `SimpleROS`, the default, which does not — and whose grass
-agreement is an accident worth understanding before trusting any of it.
+## 1. Point physics: both rate-of-spread models, one metric
 
-### 1.1 `RothermelROS` against the reference
+```bash
+python scripts/validate_pyretechnics.py ros
+```
+
+Both models are measured the same way: **relative error against `pyretechnics`
+in all eight directions**, over one grid — the three fuels the package ships,
+four dead 1-hour moistures (4, 6, 9, 18 %), and twelve wind and slope
+combinations from dead calm to 20 m/s and a 50 % grade. Each model is driven
+through the world the package actually builds for it: `SimpleROS` on a
+`fuels.PRESETS` world, `RothermelROS` on the equivalent Scott & Burgan model
+through `fuels.rothermel_world`.
+
+![head rate of spread against wind and against moisture](out/validation_ros.png)
+
+| fuel | model | cases | median | 90th pct | max |
+|---|---|---|---|---|---|
+| grass / FM102 | `SimpleROS` | 288 | 2.1e-1 | 1.3e+0 | 7.7e+0 |
+| | **`RothermelROS`** | 288 | **8.4e-5** | **2.2e-4** | **2.4e-4** |
+| shrub / FM142 | `SimpleROS` | 288 | 6.0e+0 | 1.5e+1 | 4.8e+1 |
+| | **`RothermelROS`** | 288 | **5.1e-5** | **2.0e-4** | **3.1e-4** |
+| timber / FM163 | `SimpleROS` | 384 | 6.6e-1 | 7.7e-1 | 8.6e-1 |
+| | **`RothermelROS`** | 384 | **4.9e-5** | **1.6e-4** | **1.9e-4** |
+
+Four orders of magnitude between them at the median, and `RothermelROS` is at
+float32 — which is what closed-form algebra should manage, and means the number
+there measures accumulation rather than modelling.
+
+### 1.1 Is that a fair grid?
+
+The sweep varies fuel moisture, and **`SimpleROS` has no moisture term at all** —
+`ros/simple.py` never reads `state.moisture`. Pinning moisture at 6 %, which is
+what the presets were implicitly written for, removes that axis:
+
+| fuel | model | median | 90th pct | max |
+|---|---|---|---|---|
+| grass / FM102 | `SimpleROS` | 2.1e-1 | 1.6e+0 | 5.9e+0 |
+| | `RothermelROS` | 8.4e-5 | 2.2e-4 | 2.2e-4 |
+| shrub / FM142 | `SimpleROS` | 6.1e+0 | 1.5e+1 | 2.4e+1 |
+| | `RothermelROS` | 5.1e-5 | 1.6e-4 | 2.0e-4 |
+| timber / FM163 | `SimpleROS` | 7.2e-1 | 7.7e-1 | 8.5e-1 |
+| | `RothermelROS` | 4.9e-5 | 1.6e-4 | 1.9e-4 |
+
+It barely moves. `SimpleROS` is not being punished for an axis it does not
+model; it is wrong on the axes it does.
+
+That missing moisture term is worth dwelling on, because it is load-bearing for
+this project. Grass, 3 m/s, flat:
+
+| dead 1-h moisture | `SimpleROS` | `RothermelROS` | reference |
+|---|---|---|---|
+| 3 % | 0.27981 | 0.35228 | 0.35229 |
+| 6 % | 0.27981 | 0.29399 | 0.29400 |
+| 12 % | 0.27981 | 0.19422 | 0.19422 |
+| 20 % | 0.27981 | **0.00000** | **0.00000** |
+
+GR2's dead moisture of extinction is 15 %. Past it the fuel cannot carry fire
+and the reference goes to zero; `SimpleROS` returns the same number it returns
+for bone-dry grass. The README says suppression "acts through fuel moisture, not
+as a special case — water raises a cell's moisture; past the fuel's moisture of
+extinction, the fuel stops carrying fire. That mechanism is already in
+Rothermel." Under `SimpleROS` it is not: a drop can only act through the
+separate multiplicative gate in `SuppressionModel`. `RothermelROS` is the first
+model in this package that actually provides the advertised pathway.
+
+### 1.2 Rothermel across every fuel model
 
 ```bash
 python scripts/validate_pyretechnics.py rothermel
 ```
 
-Rothermel (1972) is closed-form algebra, so there is no excuse for agreeing only
-approximately. What follows measures float32 accumulation, not modelling error.
-
-**13,920 directional comparisons** — every one of the 53 burnable fuel models
-(the Anderson 13 and the Scott & Burgan 40), three dead 1-hour moistures (4 %,
-9 %, 18 %), twelve wind and slope combinations from dead calm to 20 m/s and a
-50 % grade, and all eight neighbour directions rather than the head alone:
+The table above covers the three fuels `SimpleROS` can express. `RothermelROS`
+is not limited to those, so it is also checked across **13,920 directional
+comparisons** — all 53 burnable fuel models (the Anderson 13 and the Scott &
+Burgan 40), three moistures, twelve wind and slope combinations, all eight
+directions:
 
 | | relative error |
 |---|---|
@@ -94,8 +154,7 @@ approximately. What follows measures float32 accumulation, not modelling error.
 | median | **4.9e-5** |
 | 99.9th percentile | 3.7e-4 |
 
-Broken out by fuel model family, so that the agreement is visibly not carried by
-one convenient group:
+By family, so the agreement is visibly not carried by one convenient group:
 
 | family | cases | max rel | median |
 |---|---|---|---|
@@ -107,21 +166,12 @@ one convenient group:
 | TL — timber litter | 324 | 3.4e-4 | 8.0e-5 |
 | SB — slash-blowdown | 144 | 2.0e-4 | 5.0e-5 |
 
-The error grows with wind, which is what you would expect from float32 running
-through the wind factor's exponentials — and is a scale that stays five orders of
-magnitude below anything physical:
+The error grows with wind — 5.6e-5 at dead calm, 1.4e-4 at 3 m/s, 3.7e-4 above
+12 m/s — which is float32 running through the wind factor's exponentials, at a
+scale five orders of magnitude below anything physical.
 
-| midflame wind | max rel |
-|---|---|
-| 0 m/s | 5.6e-5 |
-| 3 m/s | 1.4e-4 |
-| 6 m/s | 3.0e-4 |
-| 12–20 m/s | 3.7e-4 |
-
-Head rate of spread in absolute terms, at 6 % dead 1-hour moisture on flat
-ground, swarmfire / reference. Note the range: four decades of spread rate, from
-timber litter that barely moves to a grass model at two and a half metres per
-second, all agreeing to five figures.
+In absolute terms, at 6 % moisture on flat ground, swarmfire / reference. Four
+decades of spread rate, agreeing to five figures:
 
 | model | U = 0 | U = 3 m/s | U = 8 m/s |
 |---|---|---|---|
@@ -136,9 +186,10 @@ second, all agreeing to five figures.
 | R10 | 0.00601 / 0.00601 | 0.09536 / 0.09536 | 0.36955 / 0.36956 |
 
 GR2 at 8 m/s is 0.654 against a no-wind 0.0078 — an 84-fold wind factor that has
-stopped growing, because Rothermel's effective-wind limit has taken hold. TL3 at
-8 m/s is 0.0173 against 0.0139 at 3 m/s, nearly flat, for the same reason at a
-much lower cap. `SimpleROS` has no such term and runs away through both.
+stopped growing, because Rothermel's effective-wind limit has taken hold. TL3
+barely moves from 3 to 8 m/s for the same reason at a much lower cap. The first
+panel of the figure shows both: `RothermelROS` flattens where the reference
+does and `SimpleROS` climbs straight through.
 
 **The fuel model table.** `swarmfire/fuel_models.py` is transcribed published
 data — Anderson (1982) and Scott & Burgan (2005), both USDA — and transcription
@@ -147,85 +198,55 @@ is exactly the sort of thing that is silently wrong for months.
 against `pyretechnics`' copy: depth, load and surface-area-to-volume per size
 class, heat content, moisture of extinction, and the dynamic flag.
 
-**Three bugs this validation caught**, none of which a head-rate-only or
-flat-ground-only check would have found:
+### 1.3 Where SimpleROS's error comes from
 
-* The ellipse's length-to-breadth ratio must cap at **8**, Anderson's stated
-  limit and where BehavePlus holds it — not at a number picked for numerics. It
-  enters as an eccentricity, and between 7.1 and 8 the *backing* rate, which
-  goes as `1 − e`, changes by a quarter. Capping eccentricity at 0.99 instead
-  left the backing direction 28 % out while the head looked perfect.
-* The heading must be normalised **before** the effective-wind limit is applied.
-  The limit shrinks `phi_E` without rotating it, so normalising by the capped
-  value leaves a "unit" vector longer than one. That puts `cos(offset)` above 1,
-  the ellipse denominator through zero, and the spread rate at 1.5e5 m/s — on
-  R01 at 5 m/s over a 10 % grade, and nowhere else.
-* The offset angle belongs on the **slope-tangential plane**, where the
-  reference takes it, not in map projection. On the flat the two agree to a
-  percent; on a 50 % grade they differ by more than ten.
+`SimpleROS` has the right algebraic *shape*. `phi_w = a·U^b` and
+`phi_s = c·tan²φ` are Rothermel's own forms, its wind exponent `b = 1.5` is
+close to the fuel-dependent 1.36–1.46 Rothermel produces, and its ellipse is
+Anderson (1983) with the same coefficients expressed in m/s rather than mph
+(`0.1147 × 2.23694 = 0.25657`) — agreeing to four decimals at every wind below
+the effective-wind cap. The directional template `(1−e)/(1−e·cos θ)`, the polar
+ellipse with the ignition at a focus, is character-for-character the reference's.
 
-**What is deliberately not modelled.** Crown fire, spotting and fire-atmosphere
-feedback, as before — this is a surface spread model. `RothermelROS` also reads
-`FireState.wind` as a midflame wind and so applies no canopy wind-adjustment
-factor, which is why this comparison drives the reference at midflame height too
-rather than from a 10 m wind.
+What it lacks is any dependence on the fuel. Every coefficient is a constant
+where Rothermel's is a function of the fuel bed:
 
-### 1.2 `SimpleROS` against the reference
-
-
-![head rate of spread against wind and slope](out/validation_ros.png)
-
-#### What is already right
-
-**The ellipse is the reference ellipse, exactly.** `ros/simple.py`'s
-`length_to_breadth` is Anderson (1983) with the coefficients expressed in m/s;
-`pyretechnics` carries the same formula in mph. `0.1147 × 2.23694 = 0.25657`.
-They agree to four decimals at every wind speed below Rothermel's effective-wind
-cap. The directional template — `(1−e)/(1−e·cos θ)`, the polar ellipse with the
-ignition at a focus — is also character-for-character the reference's.
-
-**The functional forms are right.** `φ_w = a·U^b` and `φ_s = c·tan²φ` are
-Rothermel's own forms, and the wind exponent `b = 1.5` is close to the
-fuel-dependent 1.36–1.46 Rothermel produces. The 1972 algebra can be dropped in
-later without changing the shape of anything downstream.
-
-#### What is wrong, and by how much
-
-| | swarmfire | Rothermel (grass/GR2) | (shrub/SH2) | (timber/TL3) |
+| | `SimpleROS` | Rothermel GR2 | SH2 | TL3 |
 |---|---|---|---|---|
 | `ros0` (m/s) | 0.020 / 0.012 / 0.004 | 0.0078 | 0.0014 | 0.0077 |
-| wind `a` | 2.5 (all fuels) | 7.40 | 3.66 | 6.06 |
-| wind `b` | 1.5 (all fuels) | 1.46 | 1.39 | 1.36 |
-| slope `c` | 5.5 (all fuels) | 36.5 | 19.9 | 28.6 |
+| wind `a` | 2.5 — all fuels | 7.40 | 3.66 | 6.06 |
+| wind `b` | 1.5 — all fuels | 1.46 | 1.39 | 1.36 |
+| slope `c` | 5.5 — all fuels | 36.5 | 19.9 | 28.6 |
 | moisture of extinction | 0.12 / 0.20 / 0.25 | 0.15 | 0.15 | 0.30 |
 | flame residence (s) | 60 / 150 / 400 | 12.7 | 13.8 | 14.3 |
 | effective-wind cap | *none* | 5.25 m/s | 10.6 m/s | 16.3 m/s |
 
-Four separate problems:
+Which gives four distinct failures, on top of the missing moisture term in §1.1:
 
-* **`ros0` is off by a different factor per fuel, in different directions**:
+* **`ros0` is off by a different factor per fuel, in different directions** —
   grass 2.6× too fast, shrub 8.6× too fast, timber 0.52× too slow. The presets
-  were not picked from a fuel model, and it shows.
-* **The wind and slope coefficients are fuel-independent when Rothermel's are
-  not.** One constant cannot serve GR2 and SH2 — their wind scalars differ by
-  2×. The slope constant is 3.6–6.6× too weak everywhere, so steep ground
-  under-spreads badly: at a 50 % grade in zero wind, grass spreads at 60 % of
-  the reference rate; at 70 %, half.
+  were not picked from a fuel model, and it shows. There is no single correction.
+* **One wind and slope constant cannot serve every fuel.** GR2 and SH2's wind
+  scalars differ by 2×. The slope constant is 3.6–6.6× too weak everywhere, so
+  steep ground under-spreads badly: at a 50 % grade in zero wind grass spreads
+  at 60 % of the reference rate, at 70 % half.
 * **There is no effective-wind limit.** Rothermel stops believing its own wind
-  factor above `0.9 I_R`; `SimpleROS` accelerates through it. Above 5.25 m/s on
-  grass the head rate runs away — 2.45× the reference at 10 m/s — and, because
-  the ellipse is driven off the same uncapped effective wind, so does the shape.
-  At 12 m/s `length_to_breadth` returns 20 where the reference holds at 3.41;
-  `SimpleROS.max_eccentricity` clamps what is actually realised to L/B ≈ 7.1,
-  still twice the reference.
-* **Residence times are 5–28× Rothermel's.** This one matters more than it
-  looks; see §2.
+  factor above `0.9 I_R`; `SimpleROS` accelerates through it — 2.45× the
+  reference at 10 m/s on grass, and visibly diverging in the first panel of the
+  figure. Because the ellipse is driven off the same uncapped effective wind,
+  the *shape* runs away too: at 12 m/s `length_to_breadth` returns 20 where the
+  reference holds at 3.41, and `SimpleROS.max_eccentricity` clamps what is
+  realised to L/B ≈ 7.1, still twice the reference.
+* **Residence times are 5–28× Rothermel's.** This one used to matter a great
+  deal more than it looks; see §2.1.
 
 #### The accident worth knowing about
 
-Head rate of spread, grass, flat ground:
+The one case where `SimpleROS` looks fine — and the reason the summary table in
+§1 reports a median rather than a single headline number. Head rate of spread,
+grass, flat ground:
 
-| midflame wind | swarmfire | reference | ratio |
+| midflame wind | `SimpleROS` | reference | ratio |
 |---|---|---|---|
 | 0 m/s | 0.0200 | 0.0078 | 2.56 |
 | 1 m/s | 0.0700 | 0.0657 | 1.07 |
@@ -235,33 +256,48 @@ Head rate of spread, grass, flat ground:
 | 10 m/s | 1.6011 | 0.6543 | 2.45 |
 
 Between 1 and 5 m/s, `SimpleROS` on grass is within 10 % of Rothermel. That is
-not calibration: `ros0` is 2.6× too high and the wind factor is 3× too weak, and
-across that one band the two errors cancel. Outside it they stop cancelling. The
-`grass` demos in this repository sit inside the band, which is why the fires
-look about right — and why a validation harness was worth building rather than
-eyeballing GIFs.
+not calibration: `ros0` is 2.6× too high and the wind factor 3× too weak, and
+across that one band the two errors cancel. Outside it they stop. The `grass`
+demos in this repository sit inside the band, which is why the fires look about
+right — and why a harness was worth building rather than eyeballing GIFs.
 
 Shrub and timber have no such band: shrub runs 6.4–7.6× fast at every wind
 speed, timber 0.25–0.29× slow at every wind speed.
 
 ## 2. Front geometry: the propagator
 
-Both codes given **identical** directional rate of spread (head 0.2940 m/s,
-L/B 1.91), grass, 3 m/s midflame, flat, 20 m cells, 2 hours:
+```bash
+python scripts/validate_pyretechnics.py front --plot
+```
+
+Same question as §1, one layer up: given directional rates that already match
+the reference, does `CAPropagator` move the front at them? Two independent ways
+to arrange that, and they should agree:
+
+* **`RothermelROS`**, which reproduces the reference's rates directly (§1.2).
+  This is the configuration anyone running the package for real numbers uses.
+* **`validation.matched_world`**, which hands `SimpleROS` Rothermel's own
+  coefficients for one fuel and one moisture state. It predates `RothermelROS`
+  and is kept precisely because it reaches the same place by a different route.
+
+Grass / FM102, 3 m/s midflame, flat, 20 m cells, 2 hours:
 
 ![arrival time maps](out/validation_front.png)
 
 | front tracker | head (m/s) | flank (m/s) | back (m/s) | IoU |
 |---|---|---|---|---|
 | pyretechnics level set | 0.2949 | 0.0429 | 0.0236 | 1.000 |
-| *prescribed* | 0.2940 | 0.0433 | 0.0234 | — |
-| swarmfire CA, Rothermel residence (12.7 s) | 0.2777 | 0.0577 | 0.0253 | 0.887 |
-| swarmfire CA, `grass` preset residence (60 s) | 0.2777 | 0.0577 | 0.0253 | 0.887 |
-| swarmfire CA, no fuel burnout | 0.2777 | 0.0577 | 0.0253 | 0.887 |
+| *prescribed by the ROS model* | *0.2940* | *0.0433* | *0.0234* | — |
+| swarmfire CA, **`RothermelROS`** | 0.2777 | 0.0577 | 0.0253 | **0.887** |
+| swarmfire CA, matched `SimpleROS` | 0.2777 | 0.0577 | 0.0253 | **0.887** |
 
-The three swarmfire rows are identical to four figures, which is the point:
-burnout time is a property of the fuel and the front tracker is not entitled to
-see it. Head 6 % slow, back 7 % fast, flank 33 % fast, IoU 0.89.
+The two swarmfire rows are identical to four figures, which is the point of
+running both: what is left is the front tracker and not the rate-of-spread
+model. Head 6 % slow, back 8 % fast, flank 33 % fast.
+
+Read the first two rows together as well — the reference level set reproduces
+the rates it was handed to within 1 % on all three axes. That is the yardstick
+working.
 
 ### 2.1 Three bugs, and what they were hiding
 
@@ -431,7 +467,7 @@ residual 6 % gap in the head.
 | file | what it holds |
 |---|---|
 | `swarmfire/validation.py` | the `pyretechnics` adapter — coefficient extraction, `matched_world`, arrival maps from both codes, axis spread rates, IoU |
-| `scripts/validate_pyretechnics.py` | six modes: `coefficients`, `ros`, `rothermel`, `front`, `residence`, `area` |
+| `scripts/validate_pyretechnics.py` | six modes: `coefficients`, `ros` (both models, one metric), `rothermel` (all 53 fuel models), `front`, `residence`, `area` |
 | `tests/test_validation.py` | the exact identities as assertions, the current disagreement as regression guards |
 | `tests/test_rothermel.py` | `RothermelROS` and the fuel model table against the reference, cell by cell |
 
