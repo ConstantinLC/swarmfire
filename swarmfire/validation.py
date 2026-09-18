@@ -55,6 +55,7 @@ __all__ = [
     "rothermel_directional",
     "matched_world",
     "RothermelROS",
+    "NEIGHBOR_OFFSETS",
     "midflame_to_wind_10m",
     "swarmfire_directional",
     "swarmfire_head_ros",

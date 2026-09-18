@@ -172,9 +172,10 @@ python scripts/validate_pyretechnics.py all --plot
 the reference on every fuel** (IoU 0.78–0.89), against 45× too much on shrub and
 10× too little on timber for the `SimpleROS` presets. `ros/rothermel.py`
 implements Rothermel (1972) over the Anderson 13 and Scott & Burgan 40 fuel
-models and agrees with `pyretechnics` to float32 — worst relative error 3.7e-4
-across 1740 cases spanning every burnable model, three moistures, twelve wind
-and slope combinations and all eight directions.
+models and agrees with `pyretechnics` to float32 — worst relative error 3.7e-4,
+median 4.9e-5, across **13,920 directional comparisons** spanning every burnable
+model, three moistures, twelve wind and slope combinations and all eight
+directions. [`VALIDATION.md`](VALIDATION.md) §1.1 has the breakdown.
 
 ```python
 from swarmfire import rothermel_world, RothermelROS, CAPropagator
@@ -191,7 +192,7 @@ tracker:
 
 | what | verdict |
 |---|---|
-| `RothermelROS` vs the reference, all fuels and directions | **float32** — worst 3.7e-4 over 1740 cases |
+| `RothermelROS` vs the reference, all fuels and directions | **float32** — worst 3.7e-4 over 13,920 comparisons |
 | ellipse template (Anderson 1983) | **exact** — same formula, same coefficients in different units |
 | `SimpleROS` wind, slope and `ros0` coefficients | fuel-independent where Rothermel's are not: off by 0.25–8.6× |
 | front speed, identical ROS | head 94 %, back 107 %, flank **133 %**, IoU 0.89 |

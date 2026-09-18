@@ -15,6 +15,9 @@ surface spread with an Eulerian level-set front tracker. Four modes:
                   resolution - two things it must not depend on, and used to.
     area          the bottom line: burned area after two hours, package as
                   shipped against the reference, with nothing matched.
+    rothermel     `RothermelROS` against the reference cell by cell - every
+                  burnable fuel model, all eight directions. This is the check
+                  the ROS seam was built for.
 
     python scripts/validate_pyretechnics.py all --device cuda
     python scripts/validate_pyretechnics.py front --wind 3 --plot
@@ -499,13 +502,118 @@ def _rothermel(args) -> V.RothermelROS:
     )
 
 
+
+# ------------------------------------------------------- the real physics slot
+
+
+ROTHERMEL_COMBOS = (
+    (0.0, 0.0), (1.0, 0.0), (3.0, 0.0), (6.0, 0.0), (12.0, 0.0), (20.0, 0.0),
+    (0.0, 0.2), (0.0, 0.5), (2.0, 0.2), (3.0, 0.3), (6.0, 0.5), (15.0, 0.3),
+)
+ROTHERMEL_MOISTURES = (0.04, 0.09, 0.18)
+
+FAMILIES = (
+    ("Anderson 13", range(1, 14)),
+    ("GR", range(101, 110)),
+    ("GS", range(121, 125)),
+    ("SH", range(141, 150)),
+    ("TU", range(161, 166)),
+    ("TL", range(181, 190)),
+    ("SB", range(201, 205)),
+)
+
+
+def _family_of(number: int) -> str:
+    for name, members in FAMILIES:
+        if number in members:
+            return name
+    return "?"
+
+
+def rothermel(args) -> None:
+    """`RothermelROS` against the reference, every model and every direction.
+
+    Rothermel is closed-form, so there is no excuse for agreeing only
+    approximately: what this measures is float32 accumulation, not modelling
+    error, and the numbers should read that way.
+    """
+    from swarmfire.fuel_models import FUEL_MODEL_NAMES, FUEL_MODELS, is_burnable
+
+    ros_model = _rothermel(args)
+    numbers = [n for n in sorted(FUEL_MODELS) if is_burnable(n)]
+    east = V.NEIGHBOR_OFFSETS.index((0, 1))
+
+    _rule("RothermelROS vs pyretechnics, all eight directions")
+    print(
+        f"{len(numbers)} burnable fuel models x {len(ROTHERMEL_MOISTURES)} dead 1-h moistures\n"
+        f"x {len(ROTHERMEL_COMBOS)} wind/slope combinations x 8 directions\n"
+    )
+
+    by_family: dict[str, list[float]] = {name: [] for name, _ in FAMILIES}
+    by_wind: dict[float, list[float]] = {}
+    every: list[float] = []
+
+    for moisture in ROTHERMEL_MOISTURES:
+        for number in numbers:
+            for wind, slope in ROTHERMEL_COMBOS:
+                state = uniform_world(
+                    batch=1, grid=(5, 5), preset="grass", cell_size=30.0,
+                    wind=(wind, 0.0), slope=(slope, 0.0), device="cpu",
+                )
+                state = state.replace(
+                    fuel_model=torch.full_like(state.ros0, float(number)),
+                    moisture=torch.full_like(state.moisture, moisture),
+                )
+                mine = ros_model(state)[0, :, 2, 2].detach().numpy()
+                theirs = V.rothermel_directional(number, wind, slope, args.moisture_for(moisture))
+                if theirs.max() < 1e-6:
+                    continue  # fuel past its moisture of extinction; both say zero
+                relative = np.abs(mine - theirs) / np.maximum(theirs, 1e-9)
+                every.extend(relative.tolist())
+                by_family[_family_of(number)].append(float(relative.max()))
+                by_wind.setdefault(wind, []).append(float(relative.max()))
+
+    errors = np.array(every)
+    print(f"{len(errors)} directional comparisons")
+    print(f"  max          {errors.max():.2e}")
+    print(f"  median       {np.median(errors):.2e}")
+    print(f"  99.9th pct   {np.percentile(errors, 99.9):.2e}\n")
+
+    print(f"{'family':12} {'cases':>7} {'max rel':>10} {'median':>10}")
+    for name, _ in FAMILIES:
+        values = np.array(by_family[name])
+        print(f"{name:12} {len(values):>7} {values.max():>10.2e} {np.median(values):>10.2e}")
+
+    print(f"\n{'wind m/s':>9} {'max rel':>10}   (error grows with wind: it accumulates")
+    for wind in sorted(by_wind):
+        print(f"{wind:>9.0f} {np.array(by_wind[wind]).max():>10.2e}", end="")
+        print("    through the wind factor's exponentials)" if wind == 0 else "")
+
+    _rule("Head rate of spread, m/s: swarmfire / reference")
+    print(f"{'model':>6} {'U = 0':>19} {'U = 3':>19} {'U = 8':>19}")
+    for number in (102, 104, 142, 145, 163, 183, 204, 1, 10):
+        row = f"{FUEL_MODEL_NAMES[number]:>6}"
+        for wind in (0.0, 3.0, 8.0):
+            state = uniform_world(batch=1, grid=(3, 3), preset="grass", wind=(wind, 0.0),
+                                  device="cpu")
+            state = state.replace(
+                fuel_model=torch.full_like(state.ros0, float(number)),
+                moisture=torch.full_like(state.moisture, 0.06),
+            )
+            mine = float(ros_model(state)[0, east, 1, 1])
+            theirs = V.rothermel_directional(number, wind, 0.0, args.moisture)[east]
+            row += f"   {mine:.5f}/{theirs:.5f}"
+        print(row)
+
+
 # --------------------------------------------------------------------- driver
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "mode", choices=["all", "coefficients", "ros", "front", "residence", "area"]
+        "mode",
+        choices=["all", "coefficients", "ros", "rothermel", "front", "residence", "area"],
     )
     parser.add_argument("--preset", default="grass", choices=list(V.FUEL_EQUIVALENTS))
     parser.add_argument("--wind", type=float, default=3.0, help="midflame wind, m/s")
@@ -517,6 +625,8 @@ def main() -> None:
     parser.add_argument("--plot", action="store_true", help="write figures to out/")
     args = parser.parse_args()
     args.moisture = V.STANDARD_MOISTURE
+    # `rothermel` mode sweeps dead 1-hour moisture; the other four classes stay put.
+    args.moisture_for = lambda dead_1hr: {**V.STANDARD_MOISTURE, "dead_1hr": dead_1hr}
 
     if not V.PYRETECHNICS_AVAILABLE:
         raise SystemExit('pyretechnics is not installed. Run: pip install "swarmfire[real]"')
@@ -526,6 +636,7 @@ def main() -> None:
         "coefficients": coefficients,
         "ros": ros,
         "front": front,
+        "rothermel": rothermel,
         "residence": residence,
         "area": area,
     }
