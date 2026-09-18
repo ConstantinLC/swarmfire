@@ -1,0 +1,40 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Packaging and build
+*.egg-info/
+build/
+dist/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# LaTeX build products. `paper/` keeps main.tex, refs.bib, the .sty and the
+# built main.pdf; everything latexmk regenerates is noise.
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# NOT ignored: out/. The GIFs and figures there are referenced by README.md and
+# VALIDATION.md, so they are committed deliberately.
