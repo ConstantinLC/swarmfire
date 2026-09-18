@@ -37,6 +37,12 @@ class FuelPreset:
         return 1.0 / self.residence
 
 
+# The standard fuel model each preset is a stand-in for, so that a world built
+# from a preset can also be handed to `RothermelROS`. The presets themselves are
+# not calibrated against these - see VALIDATION.md for how far apart they are.
+FUEL_MODEL_FOR_PRESET: dict[str, int] = {"grass": 102, "shrub": 142, "timber": 183}
+
+
 # Grass carries fire fast and dries out early; timber litter is the opposite.
 PRESETS: dict[str, FuelPreset] = {
     "grass": FuelPreset("grass", ros0=0.020, moisture_ext=0.12, residence=60.0, moisture=0.06),
@@ -80,6 +86,7 @@ def uniform_world(
         water=torch.zeros_like(ones),
         retardant=torch.zeros_like(ones),
         elevation=elevation,
+        fuel_model=ones * FUEL_MODEL_FOR_PRESET[preset],
         ros0=ones * fp.ros0,
         moisture_ext=ones * fp.moisture_ext,
         burn_rate=ones * fp.burn_rate,
@@ -113,7 +120,7 @@ def patchy_world(
     field = torch.nn.functional.interpolate(coarse, size=(h, w), mode="bicubic", align_corners=False)
     field = field.squeeze(1).clamp(0, 1).to(state.device)
 
-    ros0, mx, br, moist = (torch.zeros_like(field) for _ in range(4))
+    ros0, mx, br, moist, model = (torch.zeros_like(field) for _ in range(5))
     edges = torch.linspace(0, 1, len(presets) + 1)
     for i, name in enumerate(presets):
         fp = PRESETS[name]
@@ -123,5 +130,60 @@ def patchy_world(
         mx += mask * fp.moisture_ext
         br += mask * fp.burn_rate
         moist += mask * fp.moisture
+        model += mask * FUEL_MODEL_FOR_PRESET[name]
 
-    return state.replace(ros0=ros0, moisture_ext=mx, burn_rate=br, moisture=moist)
+    return state.replace(
+        ros0=ros0, moisture_ext=mx, burn_rate=br, moisture=moist, fuel_model=model
+    )
+
+
+def rothermel_world(
+    batch: int = 1,
+    grid: tuple[int, int] = (128, 128),
+    fuel_model: int | Tensor = 102,
+    moisture: float = 0.06,
+    cell_size: float = 30.0,
+    wind: tuple[float, float] = (0.0, 0.0),
+    slope: tuple[float, float] = (0.0, 0.0),
+    device: str | torch.device = "cpu",
+    ros_model=None,
+) -> FireState:
+    """A world described by a standard fuel model rather than by a preset.
+
+    This is the builder to use with `RothermelROS`, and the one a LANDFIRE
+    raster feeds: pass `fuel_model` as an `[H, W]` or `[B, H, W]` tensor of
+    model numbers and the whole landscape comes from the table.
+
+    It also fills `ros0`, `moisture_ext` and `burn_rate` *from Rothermel*, so
+    the summary layers the propagator and the simpler ROS models read agree with
+    the spread model rather than contradicting it. In particular `burn_rate`
+    becomes Anderson's flame residence time for the fuel bed, which for fine
+    fuels is a good deal shorter than the hand-picked preset values - see
+    VALIDATION.md on why that no longer changes the front speed.
+
+    `moisture` is dead 1-hour fuel moisture, the layer suppression raises. The
+    coarser and live classes live on the `RothermelROS` instance; pass your own
+    `ros_model` to set them.
+    """
+    from .ros.rothermel import RothermelROS
+
+    state = uniform_world(
+        batch=batch, grid=grid, preset="grass", cell_size=cell_size,
+        wind=wind, slope=slope, device=device,
+    )
+    models = torch.as_tensor(fuel_model, dtype=torch.float32, device=state.device)
+    state = state.replace(
+        fuel_model=models.expand_as(state.ros0).contiguous(),
+        moisture=torch.full_like(state.moisture, float(moisture)),
+    )
+
+    model = ros_model or RothermelROS()
+    base = model.no_wind_no_slope(state)
+    residence = base["residence_s"].clamp(min=1e-3)
+    return state.replace(
+        ros0=base["base_ros"],
+        moisture_ext=base["moisture_ext"],
+        burn_rate=torch.where(
+            base["burnable"], 1.0 / residence, torch.zeros_like(residence)
+        ),
+    )

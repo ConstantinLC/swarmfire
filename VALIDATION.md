@@ -20,34 +20,32 @@ pytest tests/test_validation.py
 
 ## The bottom line first
 
-Uniform fuel, flat ground, point ignition, two hours, 20 m cells, package as
-shipped (`SimpleROS`, `fuels.PRESETS`, `CAPropagator` — nothing tuned):
+Uniform fuel, flat ground, point ignition, two hours, 20 m cells, nothing tuned.
+`SimpleROS` runs on `fuels.PRESETS`; `RothermelROS` runs on the equivalent
+Scott & Burgan model:
 
-| preset | midflame wind | reference (ha) | swarmfire (ha) | ratio | IoU |
-|---|---|---|---|---|---|
-| grass | 2 m/s | 102.7 | 101.7 | 0.99 | 0.87 |
-| grass | 3 m/s | 222.1 | 189.8 | 0.85 | 0.79 |
-| grass | 5 m/s | 306.2 | 240.6 | 0.79 | 0.74 |
-| shrub | 2 m/s | 1.0 | 46.9 | 45.1 | 0.02 |
-| shrub | 3 m/s | 2.1 | 85.8 | 41.2 | 0.02 |
-| shrub | 5 m/s | 4.4 | 147.4 | 33.5 | 0.03 |
-| timber | 2 m/s | 61.6 | 7.4 | 0.12 | 0.12 |
-| timber | 3 m/s | 122.3 | 12.5 | 0.10 | 0.10 |
-| timber | 5 m/s | 224.1 | 20.9 | 0.09 | 0.09 |
+| preset | wind | reference (ha) | **Rothermel** | ratio | IoU | *SimpleROS* | *ratio* | *IoU* |
+|---|---|---|---|---|---|---|---|---|
+| grass | 2 m/s | 102.7 | 123.6 | 1.20 | 0.83 | *101.7* | *0.99* | *0.87* |
+| grass | 3 m/s | 222.1 | 239.2 | 1.08 | 0.89 | *189.8* | *0.85* | *0.79* |
+| grass | 5 m/s | 306.2 | 271.2 | 0.89 | 0.80 | *240.6* | *0.79* | *0.74* |
+| shrub | 2 m/s | 1.0 | 2.3 | 2.23 | 0.45 | *46.9* | *45.1* | *0.02* |
+| shrub | 3 m/s | 2.1 | 3.5 | 1.67 | 0.60 | *85.8* | *41.2* | *0.02* |
+| shrub | 5 m/s | 4.4 | 5.3 | 1.20 | 0.81 | *147.4* | *33.5* | *0.03* |
+| timber | 2 m/s | 61.6 | 79.1 | 1.28 | 0.78 | *7.4* | *0.12* | *0.12* |
+| timber | 3 m/s | 122.3 | 140.4 | 1.15 | 0.87 | *12.5* | *0.10* | *0.10* |
+| timber | 5 m/s | 224.1 | 194.9 | 0.87 | 0.79 | *20.9* | *0.09* | *0.09* |
 
-Grass lands within 1–21 % of the reference and overlaps it by three quarters.
-Shrub and timber are out by more than an order of magnitude — and **every bit of
-that is now the rate-of-spread model**, not the front tracker. `PRESETS["shrub"]`
-carries a no-wind spread rate 8.6× Rothermel's SH2 and `PRESETS["timber"]` one
-about half of TL3's; the propagator faithfully delivers both. Grass agrees only
-because its two errors happen to cancel in this wind band (§1).
+With `RothermelROS` every fuel lands within about 30 % of the reference, except
+shrub at low wind where the whole fire is one or two hectares and two cells of
+discretisation is the entire difference. With the presets, shrub is out by a
+factor of 45 and timber by a factor of 10.
 
-> **These numbers replace two earlier sets.** As originally measured, grass came
-> out at 0.18–0.32× — not because the fuels were better but because three bugs
-> in `propagate.py` were fighting each other. Fixing them moved grass to 0.01×
-> (worse, briefly, once the bug that was propping the fire up was removed) and
-> then to the table above. [§2](#2-front-geometry-the-propagator) is that story;
-> it is the reason this document splits physics from front tracking at all.
+Grass is the exception that proves the point: `SimpleROS` matches it almost
+exactly, by accident, because two large errors cancel across that wind band
+(§1). Nothing about that transfers to another fuel.
+
+What is left is the front tracker rather than the physics — §2.
 
 ## Why the comparison is split in two
 
@@ -70,6 +68,15 @@ precision (asserted in `tests/test_validation.py`). Propagate that, and whatever
 disagreement is left belongs to the propagator.
 
 ## 1. Point physics: `SimpleROS` vs Rothermel
+
+`ros/rothermel.py` is now implemented, and `tests/test_rothermel.py` checks it
+against `pyretechnics` across every one of the 53 burnable fuel models, three
+dead-fuel moistures, twelve wind and slope combinations and all eight
+directions — **1740 cases, worst relative error 3.7e-4, median 7.5e-5**. That is
+float32 agreement, which is what closed-form algebra should manage. So the rest
+of this section is about `SimpleROS`: what the default model gets wrong, and why
+its grass agreement is not evidence of anything.
+
 
 ![head rate of spread against wind and slope](out/validation_ros.png)
 
@@ -291,35 +298,52 @@ residual 6 % gap in the head.
 ## What to do about it, in order
 
 1. ~~Fix the propagator before the physics.~~ **Done.** `front_source` separates
-   arrival from combustion, `soft_gate` closes both floors, and
+   arrival from combustion, `soft_gate` closes both smouldering floors, and
    `torch.linalg.vector_norm` keeps the backward pass finite. Front speed is now
    independent of burnout time and of resolution, and gradients survive the
-   simulator. What remains in `propagate.py` is §2.2 and §2.3 — the p-norm and
-   the timestep drift — which want a minimum-arrival-time scheme rather than
-   more tuning.
-2. **Implement `ros/rothermel.py`.** This is now the largest error by far: with
-   the front tracker honest, shrub is 33–45× the reference and timber a tenth of
-   it, entirely because of `SimpleROS` and `fuels.PRESETS`.
-   `swarmfire/validation.py` already extracts every coefficient it needs from
-   `pyretechnics` in SI units, and `tests/test_validation.py` has the
-   cell-by-cell identity assertions ready to point at it.
-3. **Retire the presets in favour of Scott & Burgan fuel models.** `grass`,
-   `shrub` and `timber` are stand-ins for GR2, SH2 and TL3 and are wrong by
-   different factors in different directions; there is no single correction.
-4. **Re-run the suppression study.** Every result in the README predates all of
-   this and rests on a fire that did not spread at its own stated rate.
+   simulator.
+2. ~~Implement `ros/rothermel.py`.~~ **Done.** Rothermel (1972) over the
+   Anderson 13 and Scott & Burgan 40 fuel models, agreeing with `pyretechnics`
+   to float32 across 1740 cases. `fuels.rothermel_world` builds a world from a
+   fuel-model raster and fills `ros0`, `moisture_ext` and `burn_rate` from the
+   same model, so the propagator's fuel accounting and the spread model describe
+   one fire rather than two.
+3. **Load real landscapes.** `RothermelROS` already takes a per-cell fuel model
+   number, which is exactly what a LANDFIRE fuel-model raster contains, so this
+   is now a data-loading job rather than a modelling one: elevation into
+   `FireState.elevation`, the fuel-model raster into `FireState.fuel_model`, and
+   `landfire` to fetch both. Canopy cover and height are not read yet; they
+   belong with the wind-adjustment factor, which this model does not apply
+   because `FireState.wind` is already a midflame wind.
+4. **Replace the scalar weather moistures.** `RothermelROS` takes the 10-hour,
+   100-hour and live moistures as constructor arguments because they are
+   weather, near-uniform over a fire-sized domain, and there is no weather model
+   to vary them. Dead 1-hour is already a per-cell layer, which is the one that
+   matters: it is what suppression raises.
+5. **Finish the front tracker.** §2.2 and §2.3 are what remain — the p-norm's
+   33 % flank overshoot and a few percent of timestep drift. Both want a
+   minimum-arrival-time scheme rather than more tuning, and both now dominate
+   the error budget.
+6. **Calibrate the suppression constants** in `SuppressionModel` against
+   drop-test coverage-level data. With Rothermel in place, a drop reaches spread
+   rate through the published moisture-damping term, so the thing left to
+   calibrate is how much moisture a given coverage level actually adds.
+7. **Re-run the suppression study.** Every result in the README predates all of
+   this.
 
 ## What this harness is
 
 | file | what it holds |
 |---|---|
-| `swarmfire/validation.py` | the reference adapter — coefficient extraction, `matched_world`, arrival maps from both codes, axis spread rates, IoU |
+| `swarmfire/validation.py` | the `pyretechnics` adapter — coefficient extraction, `matched_world`, arrival maps from both codes, axis spread rates, IoU |
 | `scripts/validate_pyretechnics.py` | five modes: `coefficients`, `ros`, `front`, `residence`, `area` |
-| `tests/test_validation.py` | the identities as exact assertions, the current disagreement as regression guards |
+| `tests/test_validation.py` | the exact identities as assertions, the current disagreement as regression guards |
+| `tests/test_rothermel.py` | `RothermelROS` and the fuel model table against the reference, cell by cell |
 
-The tolerances in the test file are measurements, not targets. They are there so
-that a change in the physics shows up as a failing test and gets looked at, not
-so that they pass.
+The tolerances in `test_validation.py` are measurements, not targets. They are
+there so that a change in the physics shows up as a failing test and gets looked
+at, not so that they pass. `test_rothermel.py` is different: those are float32
+tolerances on closed-form algebra, and they should never need loosening.
 
 ### Comparison conditions
 

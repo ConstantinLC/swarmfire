@@ -27,9 +27,12 @@ from torch import Tensor
 DYNAMIC_LAYERS = ("fuel", "moisture", "intensity", "burned", "ignition", "water", "retardant")
 
 # Layers fixed for an episode: terrain and the fuel bed's intrinsic properties.
-# A Rothermel ROS model would extend this list (SAV ratio, bulk density, fuel
-# load by size class, heat content) without touching anything else.
-STATIC_LAYERS = ("elevation", "ros0", "moisture_ext", "burn_rate")
+# `fuel_model` is a standard fire behaviour fuel model number - the thing a
+# LANDFIRE raster contains - and is what `RothermelROS` reads the whole fuel bed
+# from. `ros0`, `moisture_ext` and `burn_rate` are the summary the simpler
+# models and the propagator use; `fuels.rothermel_world` fills them from
+# Rothermel so the two descriptions agree.
+STATIC_LAYERS = ("elevation", "fuel_model", "ros0", "moisture_ext", "burn_rate")
 
 OBS_LAYERS = DYNAMIC_LAYERS + STATIC_LAYERS
 
@@ -56,6 +59,9 @@ class FireState:
     water : free water on the fuel bed, in mm of equivalent depth. Evaporates.
     retardant : coverage level in [0, 1]. Persistent; decays over hours.
     elevation : metres above datum, used for the slope term in spread.
+    fuel_model : standard fire behaviour fuel model number per cell, as a float
+        so it stacks with everything else. See `fuel_models.FUEL_MODELS`; 91-99
+        are the non-burnable codes.
     ros0 : no-wind, no-slope rate of spread, m/s. Per cell, so heterogeneous
         fuel beds work out of the box.
     moisture_ext : moisture of extinction. Above this, the fuel will not carry
@@ -76,6 +82,7 @@ class FireState:
     retardant: Tensor
 
     elevation: Tensor
+    fuel_model: Tensor
     ros0: Tensor
     moisture_ext: Tensor
     burn_rate: Tensor

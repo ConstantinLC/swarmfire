@@ -118,7 +118,8 @@ whole propagation step is a 3×3 stencil plus elementwise algebra.
 | `state.py` | the layer stack — terrain, fuel, weather, fire, suppressant, all as `[B,H,W]` rasters |
 | `grid.py` | neighbour geometry, the `shift` stencil, terrain gradients |
 | `ros/simple.py` | wind + slope → elliptical directional spread rates |
-| `ros/rothermel.py` | **the realistic-physics slot** — empty, documented, one-line swap |
+| `ros/rothermel.py` | Rothermel (1972) surface spread, batched and differentiable |
+| `fuel_models.py` | the Anderson 13 and Scott & Burgan 40 fuel models, as a table and as tensors |
 | `propagate.py` | the smooth CA step |
 | `suppression.py` | water/retardant dynamics and the flammability coupling |
 | `platforms.py` | tanker / helicopter / drone swarm → deposition footprints |
@@ -133,7 +134,7 @@ without touching anything else:
 
 | seam | now | next |
 |---|---|---|
-| `ROSModel` | `SimpleROS` | `RothermelROS` + LANDFIRE fuel models |
+| `ROSModel` | `SimpleROS`, `RothermelROS` | LANDFIRE rasters feeding `RothermelROS` |
 | `Propagator` | `CAPropagator` | level set / minimum arrival time |
 | `Platform` | tanker, helicopter, 32-drone swarm | ground crews, dozer lines, refill logistics |
 | `SuppressionModel` | water, retardant | foam, gel, dose-response calibration |
@@ -167,11 +168,21 @@ pip install -e ".[real]"
 python scripts/validate_pyretechnics.py all --plot
 ```
 
-**As shipped, burned area after two hours is 0.79–0.99× the reference on grass**
-(IoU 0.74–0.87), 33–45× on shrub, and 0.09–0.12× on timber. Grass is close
-because `SimpleROS` happens to agree with Rothermel there; shrub and timber are
-out by more than an order of magnitude, and that is now entirely the
-rate-of-spread model rather than the front tracker.
+**With `RothermelROS`, burned area after two hours lands within about 30 % of
+the reference on every fuel** (IoU 0.78–0.89), against 45× too much on shrub and
+10× too little on timber for the `SimpleROS` presets. `ros/rothermel.py`
+implements Rothermel (1972) over the Anderson 13 and Scott & Burgan 40 fuel
+models and agrees with `pyretechnics` to float32 — worst relative error 3.7e-4
+across 1740 cases spanning every burnable model, three moistures, twelve wind
+and slope combinations and all eight directions.
+
+```python
+from swarmfire import rothermel_world, RothermelROS, CAPropagator
+
+# A LANDFIRE fuel-model raster is the input this takes.
+state = rothermel_world(grid=(192, 192), fuel_model=102, moisture=0.06, wind=(3.0, 0.0))
+propagator = CAPropagator(RothermelROS())
+```
 
 The comparison is split so the two error sources do not hide each other. Giving
 `SimpleROS` Rothermel's own coefficients makes the two rate-of-spread models
@@ -180,11 +191,9 @@ tracker:
 
 | what | verdict |
 |---|---|
+| `RothermelROS` vs the reference, all fuels and directions | **float32** — worst 3.7e-4 over 1740 cases |
 | ellipse template (Anderson 1983) | **exact** — same formula, same coefficients in different units |
-| directional template `(1−e)/(1−e·cosθ)` | **exact** |
-| wind and slope *forms* (`a·U^b`, `c·tan²φ`) | **right**, and the wind exponent is close |
-| wind, slope and `ros0` *coefficients* | fuel-independent here, fuel-dependent in Rothermel: off by 0.25–8.6× |
-| effective-wind limit | **missing** — head rate and fire shape run away above it |
+| `SimpleROS` wind, slope and `ros0` coefficients | fuel-independent where Rothermel's are not: off by 0.25–8.6× |
 | front speed, identical ROS | head 94 %, back 107 %, flank **133 %**, IoU 0.89 |
 | front speed vs burnout time, vs resolution | **independent of both** |
 
@@ -203,28 +212,30 @@ backward pass of every rollout, so `burned_area().backward()` never worked.
 ## Going realistic
 
 1. ~~Fix `CAPropagator`~~ — **done**, see [`VALIDATION.md`](VALIDATION.md) §2.
-   What remains there is the p-norm's 33 % flank overshoot and a few percent of
-   timestep drift, both of which want a minimum-arrival-time scheme.
-2. Implement `ros/rothermel.py` (closed-form algebra — the module docstring
-   lists every term and every new state layer it needs). This is now the
-   dominant error. `swarmfire/validation.py` already extracts every coefficient
-   it needs from `pyretechnics` in SI units, and `tests/test_validation.py` has
-   the cell-by-cell identity assertions ready to point at it.
-3. Replace the three presets in `fuels.py` with Scott & Burgan fuel models, and
-   load real fuel/canopy/elevation rasters with `landfire`.
-4. Calibrate the suppression constants in `SuppressionModel` against drop-test
+2. ~~Implement `ros/rothermel.py`~~ — **done**. Rothermel (1972) over the
+   Anderson 13 and Scott & Burgan 40 fuel models, checked against
+   `pyretechnics` cell by cell.
+3. Load real landscapes with `landfire`. `RothermelROS` already takes a per-cell
+   fuel-model number, which is what a LANDFIRE fuel-model raster contains, so
+   this is a data-loading job now rather than a modelling one.
+4. Give the weather moistures a model. The 10-hour, 100-hour and live classes
+   are `RothermelROS` constructor arguments; dead 1-hour is already per-cell,
+   which is the one suppression moves.
+5. Finish the front tracker: the p-norm's 33 % flank overshoot and a few percent
+   of timestep drift now dominate the error budget.
+6. Calibrate the suppression constants in `SuppressionModel` against drop-test
    coverage-level data.
-5. Re-run the suppression study. Every result below it predates the propagator
-   fix and rests on a fire that did not spread at its own stated rate.
-
-Steps 2–3 change one constructor argument and the contents of `fuels.py`.
-Nothing else in the package moves.
+7. Re-run the suppression study. Every result below it predates all of this.
 
 ## Caveats
 
-- The `SimpleROS` coefficients are plausible orders of magnitude, not
-  calibrated values. Numbers out of this model are not predictions —
-  [`VALIDATION.md`](VALIDATION.md) says by how much, per fuel.
+- `SimpleROS` is still the default, and its coefficients are plausible orders
+  of magnitude rather than calibrated values — out by up to 45× on shrub. Pass
+  `ros_model=RothermelROS()` and build the world with `rothermel_world` for
+  numbers that mean something. [`VALIDATION.md`](VALIDATION.md) has both.
+- `RothermelROS` is surface spread only: no crown fire, no spotting, no
+  fire-atmosphere feedback. It also reads `FireState.wind` as a midflame wind
+  and so applies no canopy wind-adjustment factor.
 - `CAPropagator` moves the head at 94 % of the rate of spread it is given and
   the flanks at 133 %, so fire shape is blunter than a real fire ellipse. Front
   speed no longer depends on burnout time or on `cell_size`.

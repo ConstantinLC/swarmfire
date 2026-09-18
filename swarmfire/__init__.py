@@ -16,7 +16,8 @@ The pieces are meant to be replaced one at a time:
 """
 
 from .env import EnvConfig, FireEnv
-from .fuels import PRESETS, patchy_world, uniform_world
+from .fuel_models import FUEL_MODEL_NAMES, FUEL_MODELS
+from .fuels import PRESETS, patchy_world, rothermel_world, uniform_world
 from .platforms import DiscPlatform, LineDropPlatform, Platform, PlatformSpec, make_platform
 from .propagate import CAPropagator, Propagator
 from .ros import ConstantROS, ROSModel, RothermelROS, SimpleROS
@@ -28,7 +29,8 @@ __version__ = "0.1.0"
 __all__ = [
     "FireEnv", "EnvConfig",
     "FireState", "ignite", "OBS_LAYERS", "DYNAMIC_LAYERS", "STATIC_LAYERS",
-    "uniform_world", "patchy_world", "PRESETS",
+    "uniform_world", "patchy_world", "rothermel_world", "PRESETS",
+    "FUEL_MODELS", "FUEL_MODEL_NAMES",
     "ROSModel", "SimpleROS", "ConstantROS", "RothermelROS",
     "Propagator", "CAPropagator",
     "SuppressionModel",

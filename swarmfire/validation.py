@@ -42,7 +42,7 @@ import torch
 from .fuels import uniform_world
 from .grid import NEIGHBOR_OFFSETS
 from .propagate import Propagator
-from .ros import ROSModel, SimpleROS
+from .ros import ROSModel, RothermelROS, SimpleROS
 from .state import FireState, ignite
 
 __all__ = [
@@ -54,6 +54,7 @@ __all__ = [
     "rothermel_point",
     "rothermel_directional",
     "matched_world",
+    "RothermelROS",
     "midflame_to_wind_10m",
     "swarmfire_directional",
     "swarmfire_head_ros",

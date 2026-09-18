@@ -41,7 +41,7 @@ print(out["burned_ha"].mean())
 | argument | default it builds | swap it for |
 |---|---|---|
 | `platform` | `make_platform("helicopter")` | `"tanker"`, `"drone_swarm"`, or a `Platform` instance |
-| `ros_model` | `SimpleROS()` | `RothermelROS()` (not implemented yet), `ConstantROS()` |
+| `ros_model` | `SimpleROS()` | `RothermelROS()`, `ConstantROS()` |
 | `suppression` | `SuppressionModel()` | a re-parameterised `SuppressionModel` |
 | `propagator` | `CAPropagator(ros_model, suppression)` | any `Propagator` subclass |
 | `config` | `EnvConfig()` | see below |
@@ -152,7 +152,7 @@ step. It is a very weak, badly aimed drizzle, not zero.
 
 ```python
 obs = env.reset()
-obs["grid"]     # [B, 11, H, W]  — state.stack(), channels in state.OBS_LAYERS order
+obs["grid"]     # [B, 12, H, W]  — state.stack(), channels in state.OBS_LAYERS order
 obs["fleet"]    # [B, N, 5]      — y, x (both in [-1,1]), load frac, cooldown frac, dispatch frac
 
 env.action_dim  # 3, or 4 for the tanker (extra channel = drop-line bearing)
@@ -168,8 +168,9 @@ obs, reward, done, info = env.step(action)
 ```
 
 `OBS_LAYERS` = `DYNAMIC_LAYERS` (`fuel, moisture, intensity, burned, ignition,
-water, retardant`) + `STATIC_LAYERS` (`elevation, ros0, moisture_ext,
-burn_rate`) — 11 channels. Index into it by name rather than by number:
+water, retardant`) + `STATIC_LAYERS` (`elevation, fuel_model, ros0,
+moisture_ext, burn_rate`) — 12 channels. Index into it by name rather than by
+number:
 `OBS_LAYERS.index("intensity")`.
 
 Retardant is not charged for in the reward; only the water field is.
@@ -279,7 +280,7 @@ which is what makes each seam swappable in isolation.
 
 **Owns.** The entire world as a frozen-ish dataclass of `[B, H, W]` float32
 rasters sharing one grid: seven dynamic layers (`fuel, moisture, intensity,
-burned, ignition, water, retardant`), four static ones (`elevation, ros0,
+burned, ignition, water, retardant`), five static ones (`elevation, fuel_model, ros0,
 moisture_ext, burn_rate`), plus `wind [B,2]`, `cell_size` (a float, not a
 tensor) and `t [B]` elapsed seconds.
 
@@ -349,10 +350,18 @@ Called by `CAPropagator.max_stable_dt` and by `FireEnv.check_stability`.
 
 * **`ConstantROS(speed)`** — isotropic constant. Test fixture only.
 * **`SimpleROS`** — the working default (§2.6).
-* **`RothermelROS`** — an intentionally empty slot. `__call__` raises
-  `NotImplementedError`; the module docstring lists every term of the closed-form
-  Rothermel algebra and every `FireState` layer it would need. Filling it in is
-  the "get realistic" step, and touches nothing else.
+* **`RothermelROS`** — Rothermel (1972) surface spread over the standard fuel
+  models, batched and differentiable, agreeing with `pyretechnics` to float32.
+  Reads `FireState.fuel_model` (a fuel model number per cell, which is what a
+  LANDFIRE raster contains) and `FireState.moisture` (dead 1-hour, the layer
+  suppression raises); the coarser and live moisture classes are constructor
+  arguments because they are weather rather than fuel. Build worlds for it with
+  `fuels.rothermel_world`, which also fills `ros0`, `moisture_ext` and
+  `burn_rate` from the same model so the propagator agrees with it.
+
+  Filling this slot in was the "get realistic" step, and it touched nothing
+  outside `ros/`, `fuel_models.py` and one new `FireState` layer - which was the
+  point of putting a seam here in the first place.
 
 ### 2.6 `SimpleROS` — `ros/simple.py`
 
@@ -566,7 +575,8 @@ Read top to bottom, that is the entire simulator.
 | you want | do this | nothing else moves |
 |---|---|---|
 | a correct front speed | **do this first** — see [`VALIDATION.md`](VALIDATION.md) §2. Decouple arrival from `intensity`; replace the p-norm with a fastest-path update | `Propagator` contract is unchanged |
-| real fire physics | implement `RothermelROS.__call__`, add the fuel-bed layers to `STATIC_LAYERS`, validate cell-by-cell against `pyretechnics` — `swarmfire/validation.py` already extracts every coefficient in SI units | pass `ros_model=RothermelROS()` |
+| real fire physics | **done** — `RothermelROS` plus `fuels.rothermel_world` | pass `ros_model=RothermelROS()` |
+| real landscapes | load a LANDFIRE fuel-model raster into `FireState.fuel_model` and a DEM into `elevation` | `RothermelROS` already reads both |
 | real landscapes | load LANDFIRE rasters into `fuels.py` instead of `PRESETS` | `FireState` layout is unchanged |
 | a new front geometry | subclass `Propagator` (level set, minimum arrival time) — keep everything smooth | `FireEnv` takes it as `propagator=` |
 | a new vehicle | add a `PlatformSpec`, subclass `Platform`, implement `footprint`, register it in `make_platform` | the physics never learns it exists |
