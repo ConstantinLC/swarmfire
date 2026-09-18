@@ -55,9 +55,26 @@ def shift(x: Tensor, dy: int, dx: int) -> Tensor:
 def slope_vector(elevation: Tensor, cell_size: float) -> Tensor:
     """Terrain gradient as `[B, 2, H, W]` = (d z / d east, d z / d north).
 
-    Central differences, one-sided at the border. Dimensionless rise/run, so
-    the magnitude is `tan(slope angle)`.
+    Central differences in the interior, one-sided at the border. Dimensionless
+    rise/run, so the magnitude is `tan(slope angle)`.
+
+    Note that this cannot use `shift`. `shift` pads with zero, which is right
+    for fuel and fire - off-grid is unburnable - and catastrophic for
+    elevation, because "off-grid is at zero metres" puts a cliff around the
+    domain. On a 30% grade at 5 m resolution that fake cliff read as a slope of
+    71.6 rather than 0.8; the wind-equivalent of that overflowed the ellipse
+    formula to infinity, and the resulting NaN covered the grid in one step.
+    Replicating the edge row and column instead makes the border difference
+    one-sided, which is what the border deserves and what this docstring
+    claimed all along.
     """
-    dz_dx = (shift(elevation, 0, -1) - shift(elevation, 0, 1)) / (2 * cell_size)
-    dz_dy = (shift(elevation, -1, 0) - shift(elevation, 1, 0)) / (2 * cell_size)
+    padded = F.pad(elevation.unsqueeze(1), (1, 1, 1, 1), mode="replicate").squeeze(1)
+    # With a replicated edge the border difference spans one cell, not two.
+    span_x = torch.full_like(elevation, 2 * cell_size)
+    span_y = torch.full_like(elevation, 2 * cell_size)
+    span_x[..., :, 0] = span_x[..., :, -1] = cell_size
+    span_y[..., 0, :] = span_y[..., -1, :] = cell_size
+
+    dz_dx = (padded[..., 1:-1, 2:] - padded[..., 1:-1, :-2]) / span_x
+    dz_dy = (padded[..., 2:, 1:-1] - padded[..., :-2, 1:-1]) / span_y
     return torch.stack([dz_dx, dz_dy], dim=1)

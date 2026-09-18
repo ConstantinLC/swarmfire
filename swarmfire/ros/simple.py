@@ -97,7 +97,12 @@ class SimpleROS(ROSModel):
         # Lets slope-driven runs inherit the correct fire shape.
         u_eff = (magnitude / self.wind_a).clamp(min=0).pow(1.0 / self.wind_b)
         lb = length_to_breadth(u_eff)
-        ecc = (torch.sqrt((lb**2 - 1.0).clamp(min=0)) / lb).clamp(max=self.max_eccentricity)
+        # Algebraically `sqrt(lb**2 - 1) / lb`, but written so that a very large
+        # `lb` cannot produce `inf / inf`. `lb` grows exponentially in the
+        # effective wind, so it overflows float32 at around 350 m/s - which no
+        # weather produces, but a bad elevation gradient once did, and the NaN
+        # covered the whole grid in a single step. This form saturates at 1.
+        ecc = torch.sqrt((1.0 - 1.0 / (lb * lb)).clamp(min=0)).clamp(max=self.max_eccentricity)
 
         angles = neighbor_angles(device=state.device).view(1, N_DIRS, 1, 1)
         cos_off = torch.cos(angles - heading.unsqueeze(1))

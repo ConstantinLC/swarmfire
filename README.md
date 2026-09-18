@@ -40,7 +40,7 @@ print(env.rollout()["burned_ha"].mean())   # unsuppressed baseline
 
 ## Related work
 
-This work is a proposition to bridge different (currently isolated) aspects of wildfire mitigation models, in order to discover optimal wildfire response strategies. In the next table, we make an inventory of existing works :
+This work is a proposition to bridge different (currently isolated) aspects of wildfire mitigation, in order to discover optimal wildfire response strategies. In the next table, we make an inventory of existing works :
 
 | work | fire spread model | suppressant → fire coupling | delivery / platform realism | learned or optimised strategy | differentiable | batched · GPU | code available |
 |---|---|---|---|---|---|---|---|
@@ -106,6 +106,8 @@ is not consumed by the fire — which is exactly why one is dropped *on* the
 front and the other *ahead* of it, and what makes the control problem
 interesting.
 
+**Fire and Water dynamics should be jointly simulated. A simulation of only fire followed by water masking misses a part of the dynamics.** A model trained without water interventions cannot produce post-intervention dynamics.
+
 **Everything is one batched tensor op.** No Python loop over environments. The
 whole propagation step is a 3×3 stencil plus elementwise algebra.
 
@@ -122,6 +124,7 @@ whole propagation step is a 3×3 stencil plus elementwise algebra.
 | `platforms.py` | tanker / helicopter / drone swarm → deposition footprints |
 | `env.py` | batched `reset`/`step`/`rollout`, RL and differentiable modes |
 | `fuels.py` | fuel presets, homogeneous and patchy worlds |
+| `validation.py` | the `pyretechnics` adapter — coefficient extraction, matched-ROS bridge, arrival maps |
 
 ## The seams
 
@@ -151,24 +154,83 @@ Footprints are built from continuous coordinates with soft edges, so they are
 differentiable with respect to drop position and heading — a policy gets a
 gradient telling it to move a drop fifteen metres north.
 
+## Validation
+
+The simulator is measured against
+[`pyretechnics`](https://pyregence.github.io/pyretechnics/) — Rothermel (1972)
+plus an Eulerian level set, actively maintained, and callable cell by cell in a
+way BehavePlus and FARSITE are not. The full report is in
+[`VALIDATION.md`](VALIDATION.md); the short version:
+
+```bash
+pip install -e ".[real]"
+python scripts/validate_pyretechnics.py all --plot
+```
+
+**As shipped, burned area after two hours is 0.79–0.99× the reference on grass**
+(IoU 0.74–0.87), 33–45× on shrub, and 0.09–0.12× on timber. Grass is close
+because `SimpleROS` happens to agree with Rothermel there; shrub and timber are
+out by more than an order of magnitude, and that is now entirely the
+rate-of-spread model rather than the front tracker.
+
+The comparison is split so the two error sources do not hide each other. Giving
+`SimpleROS` Rothermel's own coefficients makes the two rate-of-spread models
+agree to float precision, so a fire propagated from there isolates the front
+tracker:
+
+| what | verdict |
+|---|---|
+| ellipse template (Anderson 1983) | **exact** — same formula, same coefficients in different units |
+| directional template `(1−e)/(1−e·cosθ)` | **exact** |
+| wind and slope *forms* (`a·U^b`, `c·tan²φ`) | **right**, and the wind exponent is close |
+| wind, slope and `ros0` *coefficients* | fuel-independent here, fuel-dependent in Rothermel: off by 0.25–8.6× |
+| effective-wind limit | **missing** — head rate and fire shape run away above it |
+| front speed, identical ROS | head 94 %, back 107 %, flank **133 %**, IoU 0.89 |
+| front speed vs burnout time, vs resolution | **independent of both** |
+
+Getting there meant fixing three bugs in `propagate.py`, and one of them was
+holding the others up. `ignition_drive` sourced the front from a neighbour's
+*combustion intensity*, which collapses on the flame residence timescale — 13 s
+for grass, against the 100 s the front needs to cross a 30 m cell. What kept the
+fire moving anyway was a second bug: `combustion`'s fuel gate bottomed out at
+0.269 instead of 0, so a cell with **no fuel left** never stopped driving its
+neighbours. The fire spread because burnt fuel never stopped burning. The third
+was the p-norm in `ignition_drive`, whose fractional power differentiates to
+infinity at any cell with no lit neighbour — which put a NaN through the
+backward pass of every rollout, so `burned_area().backward()` never worked.
+`front_source`, `soft_gate` and `torch.linalg.vector_norm` respectively.
+
 ## Going realistic
 
-1. Implement `ros/rothermel.py` (closed-form algebra — the module docstring
-   lists every term and every new state layer it needs).
-2. Validate it cell-by-cell against [`pyretechnics`](https://pyregence.github.io/pyretechnics/),
-   which implements the same model and is actively maintained. Agreeing with it
-   to a few percent beats any hand-rolled unit test.
-3. Load real fuel/canopy/elevation rasters with `landfire`.
+1. ~~Fix `CAPropagator`~~ — **done**, see [`VALIDATION.md`](VALIDATION.md) §2.
+   What remains there is the p-norm's 33 % flank overshoot and a few percent of
+   timestep drift, both of which want a minimum-arrival-time scheme.
+2. Implement `ros/rothermel.py` (closed-form algebra — the module docstring
+   lists every term and every new state layer it needs). This is now the
+   dominant error. `swarmfire/validation.py` already extracts every coefficient
+   it needs from `pyretechnics` in SI units, and `tests/test_validation.py` has
+   the cell-by-cell identity assertions ready to point at it.
+3. Replace the three presets in `fuels.py` with Scott & Burgan fuel models, and
+   load real fuel/canopy/elevation rasters with `landfire`.
 4. Calibrate the suppression constants in `SuppressionModel` against drop-test
    coverage-level data.
+5. Re-run the suppression study. Every result below it predates the propagator
+   fix and rests on a fire that did not spread at its own stated rate.
 
-Steps 1–3 change one constructor argument and the contents of `fuels.py`.
+Steps 2–3 change one constructor argument and the contents of `fuels.py`.
 Nothing else in the package moves.
 
 ## Caveats
 
 - The `SimpleROS` coefficients are plausible orders of magnitude, not
-  calibrated values. Numbers out of this model are not predictions.
+  calibrated values. Numbers out of this model are not predictions —
+  [`VALIDATION.md`](VALIDATION.md) says by how much, per fuel.
+- `CAPropagator` moves the head at 94 % of the rate of spread it is given and
+  the flanks at 133 %, so fire shape is blunter than a real fire ellipse. Front
+  speed no longer depends on burnout time or on `cell_size`.
+- A burnt-out cell still drives its neighbours, so a suppressant barrier can be
+  crossed hours after the fire against it has gone out. `front_source` documents
+  the trade.
 - Explicit propagation is conditionally stable. `env.check_stability()` returns
   the largest safe `dt`; call it after changing wind, fuel, or resolution.
 - Reload, empty-tank and dispatch gates are hard (non-differentiable) by

@@ -51,10 +51,41 @@ from abc import ABC, abstractmethod
 import torch
 from torch import Tensor
 
-from .grid import NEIGHBOR_OFFSETS, N_DIRS, neighbor_distances, shift
+from .grid import NEIGHBOR_OFFSETS, neighbor_distances, shift
 from .ros.base import ROSModel
 from .state import FireState
 from .suppression import SuppressionModel
+
+
+def soft_gate(x: Tensor, threshold: float, softness: float, floor_at: float = 0.0) -> Tensor:
+    """A sigmoid that is *exactly* zero at `floor_at` and still differentiable there.
+
+    A plain `sigmoid((x - threshold) / softness)` never reaches zero. With the
+    defaults in `CAPropagator` that leaves every cell in the domain - lit or
+    not, fuelled or not - burning at a small constant rate:
+
+        sigmoid((0 - 1) / 0.08)    = 3.7e-6   for a cell the front never reached
+        sigmoid((0 - 0.03) / 0.03) = 0.269    for a cell whose fuel is gone
+
+    Neither is a rounding error. The first makes every unburnt cell accumulate
+    `burned` forever, so `burned_area()` carries a bias that grows with grid
+    size and elapsed time. The second is worse: a cell that has burnt out keeps
+    reporting a quarter of full intensity, so it keeps driving its neighbours
+    and keeps counting toward `active()`. Between them `active()` on a 192x192
+    grid never fell below 0.13 against a `done` threshold of 1e-3, which meant
+    `info["extinguished"]` could not become true on any grid larger than about
+    32x32 and no rollout ever stopped early.
+
+    Subtracting the value at `floor_at` and renormalising fixes both while
+    keeping every property the smooth gate was chosen for: monotone,
+    infinitely differentiable, and unchanged to within a part in 1e5 wherever
+    the gate is actually open. The gradient at `floor_at` is small but nonzero,
+    so a cell sitting at zero progress still has a defined - if weak - path
+    back to whatever might light it.
+    """
+    gate = torch.sigmoid((x - threshold) / softness)
+    base = torch.sigmoid(torch.tensor((floor_at - threshold) / softness, device=x.device))
+    return ((gate - base) / (1.0 - base)).clamp(min=0.0)
 
 
 class Propagator(ABC):
@@ -95,15 +126,46 @@ class CAPropagator(Propagator):
         self.fuel_floor = fuel_floor
         self.fuel_softness = fuel_softness
 
+    def front_source(self, state: FireState) -> Tensor:
+        """`[B, H, W]` how strongly each cell can ignite its neighbours, in [0, 1].
+
+        Deliberately *not* `state.intensity`. Intensity is the rate fuel is
+        being consumed, which collapses on the flame residence timescale - and
+        that timescale has nothing to do with the grid. The front needs
+        `cell_size / R` seconds to cross a cell: 100 s for grass on a 30 m cell
+        against a flame residence of 13 s. Sourcing the front from intensity
+        therefore let the source go dark long before the neighbour it was
+        pushing had arrived, and the front slowed down, stopped, or - once the
+        compensating floors were removed from `combustion` - never moved at
+        all. Front speed came out dependent on `burn_rate` and on `cell_size`,
+        neither of which it may depend on.
+
+        What propagates a front is that the cell has *ignited*, which `ignition`
+        already records and which does not un-happen. Gated by flammability, so
+        that a cell the fleet has doused stops pushing its neighbours.
+
+        A latch means a burnt-out cell keeps radiating, so a fire can eventually
+        cross a barrier whose suppressant has evaporated even with nothing left
+        burning against it. That is the wrong reason for a barrier to fail and a
+        minimum-arrival-time propagator would remove it - but it is not new and
+        not a cost of this change: the previous formulation had the same
+        artefact via a fuel gate that bottomed out at 0.269 instead of zero. On
+        a 2 mm water line across a 5 m/s grass fire, the barrier failed at
+        12720 s before and 11696 s after.
+        """
+        return soft_gate(state.ignition, 1.0, self.arrival_softness) * self.suppression.flammability(
+            state
+        )
+
     def ignition_drive(self, state: FireState, ros: Tensor) -> Tensor:
         """`[B, H, W]` rate at which the front is closing on each cell, 1/s.
 
-        A neighbour burning at intensity `I`, spreading toward this cell at `R`
-        m/s across a gap of `L` m, contributes `I * R / L`. At `I = 1` that is
-        the reciprocal of the travel time, which is the whole point.
+        A neighbour that has ignited, spreading toward this cell at `R` m/s
+        across a gap of `L` m, contributes `R / L` - the reciprocal of the
+        travel time, which is the whole point.
         """
         dist = neighbor_distances(state.cell_size, device=state.device)
-        source = state.intensity
+        source = self.front_source(state)
 
         contributions = torch.stack(
             [
@@ -113,7 +175,16 @@ class CAPropagator(Propagator):
             dim=1,
         )
         # Smooth approximation to a max over directions.
-        return contributions.clamp(min=0).pow(self.pnorm).sum(dim=1).pow(1.0 / self.pnorm)
+        #
+        # Spelled as `vector_norm` rather than as `.pow(p).sum().pow(1/p)`: the
+        # two agree to float precision in the forward pass, but the hand-rolled
+        # version differentiates to `(1/p) * s**(1/p - 1)`, which is infinite at
+        # `s = 0` - and `s` is exactly zero at every cell with no lit neighbour,
+        # which is most of the grid. That put a NaN into the backward pass of
+        # every rollout. `vector_norm` defines the subgradient at the origin as
+        # zero, which is both finite and right: a cell nothing is burning
+        # toward has no sensitivity to anything.
+        return torch.linalg.vector_norm(contributions.clamp(min=0), ord=self.pnorm, dim=1)
 
     def combustion(self, state: FireState, flammability: Tensor) -> Tensor:
         """`[B, H, W]` intensity: alight, still fuelled, and dry enough.
@@ -122,8 +193,8 @@ class CAPropagator(Propagator):
         burning cell puts it out, rather than only protecting unburnt fuel -
         and that the cell relights once the water evaporates, if fuel remains.
         """
-        arrived = torch.sigmoid((state.ignition - 1.0) / self.arrival_softness)
-        fuelled = torch.sigmoid((state.fuel - self.fuel_floor) / self.fuel_softness)
+        arrived = soft_gate(state.ignition, 1.0, self.arrival_softness, floor_at=0.0)
+        fuelled = soft_gate(state.fuel, self.fuel_floor, self.fuel_softness, floor_at=0.0)
         return arrived * fuelled * flammability
 
     def step(self, state: FireState, dt: float) -> FireState:

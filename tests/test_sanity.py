@@ -184,11 +184,45 @@ def test_wet_fuel_is_not_flammable():
 # -------------------------------------------------------------- machinery
 
 
+def test_nothing_burns_where_nothing_is_lit():
+    """The smooth gates must reach zero, not merely approach it.
+
+    A plain `sigmoid((0 - 1) / 0.08)` is 3.7e-6, which sounds like nothing and
+    is not: it applies to every cell in the domain, on every step, forever.
+    """
+    state = uniform_world(batch=1, grid=(96, 96), wind=(4.0, 0.0), device=DEVICE)
+    state = burn(state, steps=20)
+    assert state.intensity.sum().item() == 0.0
+    assert state.burned.sum().item() == 0.0
+    assert state.fuel.min().item() == 1.0
+
+
+def test_burnt_out_fuel_stops_burning():
+    """A cell with no fuel left must report no combustion.
+
+    It used to report 27% of full intensity, and because `ignition_drive`
+    sources the front from a neighbour's intensity, that phantom kept driving
+    the fire outwards for the rest of the episode.
+    """
+    prop = CAPropagator(SimpleROS(), SuppressionModel())
+    state = uniform_world(batch=1, grid=(16, 16), wind=(0.0, 0.0), device=DEVICE)
+    state = state.replace(
+        fuel=torch.zeros_like(state.fuel),          # nothing left to burn
+        ignition=torch.full_like(state.ignition, 5.0),  # but long since arrived
+    )
+    state = prop.step(state, 1.0)
+    assert state.intensity.max().item() == 0.0
+    assert state.active().item() == 0.0
+
+
 def test_batch_elements_are_independent():
     state = uniform_world(batch=3, grid=(64, 64), wind=(4.0, 0.0), device=DEVICE)
-    intensity = state.intensity.clone()
-    intensity[1, 32, 32] = 1.0  # only world 1 is lit
-    state = burn(state.replace(intensity=intensity), steps=60)
+    # Light world 1 only. Seed `ignition`, not `intensity`: the front is driven
+    # by whether a cell has arrived, and `intensity` is the consumption rate it
+    # produces afterwards - see `CAPropagator.front_source`.
+    ignition = state.ignition.clone()
+    ignition[1, 32, 32] = 1.5
+    state = burn(state.replace(ignition=ignition), steps=60)
 
     assert state.burned[0].sum() == 0.0
     assert state.burned[2].sum() == 0.0
@@ -219,6 +253,14 @@ def test_gradient_reaches_the_drop_position():
 
 
 def test_platform_runs_out_and_reloads():
+    """Empty -> cooldown -> full, on the reload clock and not before.
+
+    Watch the whole cycle rather than sampling the end of it. A vehicle held at
+    full release intent re-empties on the very step after it refills, so the
+    tank is non-empty for exactly one step in every `reload_s / dt`; a single
+    check placed a few steps late sees an empty tank and reads it as "never
+    refilled".
+    """
     env = FireEnv("helicopter", config=EnvConfig(batch=1, grid=(48, 48), device=DEVICE, dt=4.0))
     env.reset()
     always_drop = torch.zeros(1, 1, 3)
@@ -228,9 +270,17 @@ def test_platform_runs_out_and_reloads():
     assert env.platform.load.item() == 0.0, "capacity was not consumed"
     assert env.platform.cooldown.item() > 0, "reload did not start"
 
-    for _ in range(int(env.platform.spec.reload_s / env.cfg.dt) + 2):
+    cycle = int(env.platform.spec.reload_s / env.cfg.dt)
+    refills = []
+    for step in range(1, cycle + 3):
         env.step(always_drop)
-    assert env.platform.load.max().item() > 0, "platform never refilled"
+        if env.platform.load.max().item() > 0:
+            refills.append(step)
+
+    assert refills, "platform never refilled"
+    # The tank comes back only once the reload clock has actually run down.
+    assert refills[0] >= cycle - 2, f"refilled early, at step {refills[0]} of {cycle}"
+    assert env.platform.load.max().item() == 0.0, "a full-intent drop should empty it again"
 
 
 def test_nothing_is_dropped_before_dispatch():
