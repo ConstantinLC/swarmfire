@@ -337,29 +337,50 @@ def front(args) -> None:
     )
     runs.append(("swarmfire CA, matched SimpleROS", matched_state, matched_ros))
 
-    print(f"{'front tracker':32} {'head':>9} {'flank':>9} {'back':>9} {'cells':>7} {'IoU':>6}")
-    axes = V.axis_spread_rates(reference, cell_size=args.cell)
+    # The target: what the ROS model returns for these three headings, in closed
+    # form. Nothing is simulated to get this - it is the number the propagator is
+    # being asked to move the front at.
+    prescribed = {
+        "head": point.head_ros,
+        "flank": point.head_ros * (1.0 - point.eccentricity),
+        "back": point.head_ros * (1.0 - point.eccentricity) / (1.0 + point.eccentricity),
+    }
+    print("ASKED FOR - the rate of spread both front trackers are handed")
+    print(f"{'':32} {'head':>9} {'flank':>9} {'back':>9}")
     print(
-        f"{'pyretechnics level set':32} {_rate(axes['head'])} {_rate(axes['flank'])}"
-        f" {_rate(axes['back'])} {int(np.isfinite(reference).sum()):7d} {1.0:6.3f}"
-    )
-    prescribed_flank = point.head_ros * (1.0 - point.eccentricity)
-    prescribed_back = point.head_ros * (1.0 - point.eccentricity) / (1.0 + point.eccentricity)
-    print(
-        f"{'  (prescribed by the ROS model)':32} {_rate(point.head_ros)}"
-        f" {_rate(prescribed_flank)} {_rate(prescribed_back)} {'':>7} {'':>6}"
+        f"{'  RothermelROS, in closed form':32} {_rate(prescribed['head'])}"
+        f" {_rate(prescribed['flank'])} {_rate(prescribed['back'])}"
     )
 
+    # The result: front speeds read back off each arrival map, by fitting
+    # distance against arrival time along each axis. Same measurement for the
+    # reference and for us, so the rows are comparable.
+    print("\nDELIVERED - front speed measured from the resulting arrival map")
+    print(
+        f"{'':32} {'head':>9} {'flank':>9} {'back':>9} {'cells':>7} {'IoU':>6}"
+        f"   {'head/asked':>11}"
+    )
+    axes = V.axis_spread_rates(reference, cell_size=args.cell)
+    print(
+        f"{'  pyretechnics level set':32} {_rate(axes['head'])} {_rate(axes['flank'])}"
+        f" {_rate(axes['back'])} {int(np.isfinite(reference).sum()):7d} {1.0:6.3f}"
+        f"   {axes['head'] / prescribed['head']:11.2f}"
+    )
     for label, state, model in runs:
         arrival = V.swarmfire_arrival_map(state, CAPropagator(model), duration, args.dt)
         a = V.axis_spread_rates(arrival, cell_size=args.cell)
         print(
-            f"{label:32} {_rate(a['head'])} {_rate(a['flank'])} {_rate(a['back'])}"
+            f"{'  ' + label:32} {_rate(a['head'])} {_rate(a['flank'])} {_rate(a['back'])}"
             f" {int(np.isfinite(arrival).sum()):7d} {V.iou(arrival, reference, duration):6.3f}"
+            f"   {a['head'] / prescribed['head']:11.2f}"
         )
         maps[label] = arrival
 
     print(
+        "\nThe gap between the two blocks is the front tracker's error: it was\n"
+        "asked to move the head at one rate and moved it at another. The\n"
+        "reference delivers what it was asked to within a percent, which is how\n"
+        "you know the yardstick works.\n"
         "\nThe two swarmfire rows agree, which is the point of running both: the\n"
         "residual is the front tracker and not the rate-of-spread model. Head\n"
         "lands about 6 percent low and back 8 percent high; the flank runs about a\n"

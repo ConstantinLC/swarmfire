@@ -284,20 +284,36 @@ Grass / FM102, 3 m/s midflame, flat, 20 m cells, 2 hours:
 
 ![arrival time maps](out/validation_front.png)
 
-| front tracker | head (m/s) | flank (m/s) | back (m/s) | IoU |
-|---|---|---|---|---|
-| pyretechnics level set | 0.2949 | 0.0429 | 0.0236 | 1.000 |
-| *prescribed by the ROS model* | *0.2940* | *0.0433* | *0.0234* | — |
-| swarmfire CA, **`RothermelROS`** | 0.2777 | 0.0577 | 0.0253 | **0.887** |
-| swarmfire CA, matched `SimpleROS` | 0.2777 | 0.0577 | 0.0253 | **0.887** |
+**Asked for** — what `RothermelROS` returns for these three headings, evaluated
+in closed form. Nothing is simulated to get this; it is the number the front
+tracker is being told to move at.
 
-The two swarmfire rows are identical to four figures, which is the point of
-running both: what is left is the front tracker and not the rate-of-spread
-model. Head 6 % slow, back 8 % fast, flank 33 % fast.
+| | head (m/s) | flank (m/s) | back (m/s) |
+|---|---|---|---|
+| `RothermelROS`, analytic | 0.2940 | 0.0433 | 0.0234 |
 
-Read the first two rows together as well — the reference level set reproduces
-the rates it was handed to within 1 % on all three axes. That is the yardstick
-working.
+**Delivered** — front speed read back off each arrival map, by fitting distance
+against arrival time along each axis. Same measurement for the reference and for
+us, so the rows compare directly.
+
+| front tracker | head | flank | back | cells | IoU | head / asked |
+|---|---|---|---|---|---|---|
+| pyretechnics level set | 0.2949 | 0.0429 | 0.0236 | 5553 | 1.000 | **1.00** |
+| swarmfire CA, **`RothermelROS`** | 0.2777 | 0.0577 | 0.0253 | 5980 | 0.887 | **0.94** |
+| swarmfire CA, matched `SimpleROS` | 0.2777 | 0.0577 | 0.0253 | 5980 | 0.887 | **0.94** |
+
+The gap between the two blocks is the front tracker's error, and nothing else:
+both were handed the same rates and one of them moved the front at 94 % of the
+head rate it was given. Head 6 % slow, back 8 % fast, flank 33 % fast.
+
+The reference row is what makes that reading safe. It delivers what it was asked
+for to within 1 % on all three axes, so the measurement is not an artefact of
+how the arrival maps are read.
+
+The two swarmfire rows are identical to four figures, which is why both are run:
+`RothermelROS` matches the reference's rates directly and `matched_world`
+reaches the same rates by substituting Rothermel's coefficients into
+`SimpleROS`. Two routes, one residual — so it belongs to `propagate.py`.
 
 ### 2.1 Three bugs, and what they were hiding
 
