@@ -20,32 +20,35 @@ pytest tests/test_validation.py tests/test_rothermel.py
 
 ## The bottom line first
 
-Uniform fuel, flat ground, point ignition, two hours, 20 m cells, nothing tuned.
-`SimpleROS` runs on `fuels.PRESETS`; `RothermelROS` runs on the equivalent
-Scott & Burgan model:
+Uniform fuel, flat ground, point ignition, two hours, 20 m cells, nothing tuned,
+default `LevelSetPropagator`. `SimpleROS` runs on `fuels.PRESETS`;
+`RothermelROS` runs on the equivalent Scott & Burgan model. The last column is
+Rothermel under the original `CAPropagator`, for comparison:
 
-| preset | wind | reference (ha) | **Rothermel** | ratio | IoU | *SimpleROS* | *ratio* | *IoU* |
-|---|---|---|---|---|---|---|---|---|
-| grass | 2 m/s | 102.7 | 123.6 | 1.20 | 0.83 | *101.7* | *0.99* | *0.87* |
-| grass | 3 m/s | 222.1 | 239.2 | 1.08 | 0.89 | *189.8* | *0.85* | *0.79* |
-| grass | 5 m/s | 306.2 | 271.2 | 0.89 | 0.80 | *240.6* | *0.79* | *0.74* |
-| shrub | 2 m/s | 1.0 | 2.3 | 2.23 | 0.45 | *46.9* | *45.1* | *0.02* |
-| shrub | 3 m/s | 2.1 | 3.5 | 1.67 | 0.60 | *85.8* | *41.2* | *0.02* |
-| shrub | 5 m/s | 4.4 | 5.3 | 1.20 | 0.81 | *147.4* | *33.5* | *0.03* |
-| timber | 2 m/s | 61.6 | 79.1 | 1.28 | 0.78 | *7.4* | *0.12* | *0.12* |
-| timber | 3 m/s | 122.3 | 140.4 | 1.15 | 0.87 | *12.5* | *0.10* | *0.10* |
-| timber | 5 m/s | 224.1 | 194.9 | 0.87 | 0.79 | *20.9* | *0.09* | *0.09* |
+| preset | wind | reference (ha) | **Rothermel** | ratio | IoU | *SimpleROS* | *ratio* | *IoU* | *CA ratio / IoU* |
+|---|---|---|---|---|---|---|---|---|---|
+| grass | 2 m/s | 102.7 | 106.4 | 1.04 | 0.965 | *93.8* | *0.91* | *0.91* | *1.20 / 0.83* |
+| grass | 3 m/s | 222.1 | 225.9 | 1.02 | 0.975 | *191.7* | *0.86* | *0.86* | *1.08 / 0.89* |
+| grass | 5 m/s | 306.2 | 317.8 | 1.04 | 0.961 | *296.0* | *0.97* | *0.95* | *0.89 / 0.80* |
+| shrub | 2 m/s | 1.0 | 1.9 | 1.81 | 0.553 | *39.4* | *37.9* | *0.03* | *2.23 / 0.45* |
+| shrub | 3 m/s | 2.1 | 3.0 | 1.44 | 0.693 | *79.3* | *38.1* | *0.03* | *1.67 / 0.60* |
+| shrub | 5 m/s | 4.4 | 6.0 | 1.35 | 0.738 | *179.4* | *40.8* | *0.03* | *1.20 / 0.81* |
+| timber | 2 m/s | 61.6 | 66.5 | 1.08 | 0.927 | *5.7* | *0.09* | *0.09* | *1.28 / 0.78* |
+| timber | 3 m/s | 122.3 | 129.6 | 1.06 | 0.944 | *11.2* | *0.09* | *0.09* | *1.15 / 0.87* |
+| timber | 5 m/s | 224.1 | 234.7 | 1.05 | 0.954 | *24.0* | *0.11* | *0.11* | *0.87 / 0.79* |
 
-With `RothermelROS` every fuel lands within about 30 % of the reference, except
-shrub at low wind where the whole fire is one or two hectares and two cells of
-discretisation is the entire difference. With the presets, shrub is out by a
-factor of 45 and timber by a factor of 10.
+With `RothermelROS` and the level set, grass and timber land within 2–8 % of
+the reference at IoU 0.93–0.975; under the CA they were within 30 % at IoU
+0.78–0.89. Shrub at low wind is still off, because the whole fire is one or two
+hectares and two cells of discretisation is the entire difference. With the
+presets, shrub is out by a factor of 40 and timber by a factor of 10.
 
 Grass is the exception that proves the point: `SimpleROS` matches it almost
 exactly, by accident, because two large errors cancel across that wind band
 (§1). Nothing about that transfers to another fuel.
 
-What is left is the front tracker rather than the physics — §2.
+Every scenario in that table blows due east. With the wind turned off the grid
+axes the CA falls far behind and the level set does not — §2.5.
 
 ## Why the comparison is split in two
 
@@ -55,9 +58,9 @@ burned-area curve as a correct simulator. So the two are measured separately:
 1. **Point physics (§1).** Does the ROS model return the rate of spread
    Rothermel returns, for the same fuel, moisture, midflame wind and slope? A
    question about `ros/` only.
-2. **Front geometry (§2).** Given rates that already match, does `CAPropagator`
-   move the front at them, and into the right shape? A question about
-   `propagate.py` only.
+2. **Front geometry (§2).** Given rates that already match, does the
+   propagator move the front at them, and into the right shape? A question
+   about `propagate.py` only.
 
 The second needs both codes driven by identical rates, and there are now two
 independent ways to arrange that. `RothermelROS` reproduces the reference's
@@ -271,8 +274,12 @@ python scripts/validate_pyretechnics.py front --plot
 ```
 
 Same question as §1, one layer up: given directional rates that already match
-the reference, does `CAPropagator` move the front at them? Two independent ways
-to arrange that, and they should agree:
+the reference, does the propagator move the front at them? Two independent ways
+to arrange that, and they should agree.
+
+§2.1–2.4 are the history of `CAPropagator`, the original cellular automaton,
+and are measured on it (`--propagator ca`). §2.5 is `LevelSetPropagator`, which
+replaced it as the default and closes what §2.2, §2.3 and §2.4 leave open.
 
 * **`RothermelROS`**, which reproduces the reference's rates directly (§1.2).
   This is the configuration anyone running the package for real numbers uses.
@@ -442,6 +449,78 @@ above rather than a headline, but it is the same family of problem: the
 propagator's answer depends on how it was discretised. It is also most of the
 residual 6 % gap in the head.
 
+### 2.4 The one the harness could not see: wind off the grid axes
+
+```bash
+python scripts/validate_pyretechnics.py heading --wind 5.4 --minutes 50
+```
+
+Everything above blows due east. That is the one direction a grid-bound tracker
+samples exactly: the head lands on a neighbour bearing. Turn the wind 22.5°,
+halfway between two bearings, and the CA can only use the ellipse's value 22.5°
+either side of the head - which, for the long thin ellipse a strong wind makes,
+is a fraction of the head rate. Grass, 5.4 m/s midflame, 50 minutes; *reach* is
+the furthest burned cell along the wind bearing, as a fraction of the
+reference's:
+
+| bearing | reference (ha) | level set (ha) | reach | IoU | CA (ha) | reach | IoU |
+|---|---|---|---|---|---|---|---|
+| 0° | 100.4 | 104.8 | 1.00 | 0.952 | 77.7 | 0.92 | 0.713 |
+| 22.5° | 96.1 | 102.8 | 0.98 | 0.926 | 44.6 | **0.41** | **0.362** |
+| 45° | 95.4 | 101.7 | 1.00 | 0.937 | 83.6 | 0.90 | 0.811 |
+| 67.5° | 96.5 | 102.8 | 0.98 | 0.930 | 44.6 | **0.41** | **0.361** |
+| 90° | 100.4 | 104.8 | 1.00 | 0.952 | 77.7 | 0.92 | 0.713 |
+
+At 3 m/s the ellipse is rounder and the CA's worst case is a reach of 0.77 (IoU
+0.69 against 0.97 for the level set). It gets worse with wind because the
+ellipse lengthens with wind, and a longer ellipse falls off faster either side
+of its head. It also hid itself: at 5.4 m/s the CA ran a 22°-bearing grass fire
+at 0.285 m/s, which is almost exactly what a 10 km/h wind produces on the axis -
+so halving the wind barely changed the fire, and the model looked insensitive to
+wind when it was really insensitive to the head.
+
+### 2.5 The level set
+
+`LevelSetPropagator` ports the reference's own scheme to batched torch: the
+front is the zero contour of `phi = 1 - ignition`, moved along its normal at the
+rate Richards' elliptical wavelet gives in that direction, with a superbee
+flux-limited upwind gradient and a two-stage (Heun) Runge–Kutta step. It needs
+the ellipse itself rather than eight samples of it, which is what
+`ROSModel.ellipse` returns. `pyretechnics` updates only a narrow band around
+the front; this updates the whole grid, which gives the same answer because
+nothing moves where `phi` is flat.
+
+Same scenario as the tables at the top of §2:
+
+| front tracker | head | flank | back | cells | IoU | head / asked |
+|---|---|---|---|---|---|---|
+| pyretechnics level set | 0.2949 | 0.0429 | 0.0236 | 5553 | 1.000 | **1.00** |
+| swarmfire level set, `RothermelROS` | 0.2907 | 0.0431 | 0.0235 | 5648 | 0.975 | **0.99** |
+| swarmfire CA, `RothermelROS` | 0.2777 | 0.0577 | 0.0253 | 5980 | 0.887 | 0.94 |
+
+And what §2.2–2.4 left open:
+
+| | CA | level set |
+|---|---|---|
+| flank / reference (§2.2) | 1.345 | **1.017** |
+| head at `dt` 2 / 5 / 10 / 20 s (§2.3) | 0.2836 / 0.2777 / 0.2683 / 0.2511 | **0.2907 / 0.2907 / 0.2907 / 0.2909** |
+| head vs flame residence 10 s – ∞ | 0.94 flat | 0.99 flat |
+| head vs cell size 10 – 45 m | 0.94 – 0.96 | 0.99 |
+| worst reach off-axis, 5.4 m/s (§2.4) | 0.41 | **0.98** |
+| a burnt-out cell drives its neighbours | yes | no |
+
+The last row changes what suppression means. Under the CA a latched,
+burnt-out cell keeps pushing the front outward once any water on it has
+evaporated. Under the level set the front enters a cell at *that cell's* rate,
+so a soaked cell ahead of the front stops it and a burnt-out cell behind it has
+no say.
+
+What remains is shared with the reference rather than introduced by the port.
+At high length/breadth both codes draw the head flat-faced rather than rounded
+- the perimeters overlap - and the swarmfire fire runs 2–8 % larger, most of
+which is how the two codes seed the ignition. The level set costs about 20 %
+more per step than the CA on a GPU.
+
 ## What to do about it, in order
 
 1. ~~Fix the propagator before the physics.~~ **Done.** `front_source` separates
@@ -467,10 +546,9 @@ residual 6 % gap in the head.
    weather, near-uniform over a fire-sized domain, and there is no weather model
    to vary them. Dead 1-hour is already a per-cell layer, which is the one that
    matters: it is what suppression raises.
-5. **Finish the front tracker.** §2.2 and §2.3 are what remain — the p-norm's
-   33 % flank overshoot and a few percent of timestep drift. Both want a
-   minimum-arrival-time scheme rather than more tuning, and both now dominate
-   the error budget.
+5. ~~Finish the front tracker.~~ **Done.** `LevelSetPropagator` is the
+   reference's scheme, and closes the flank overshoot, the timestep drift and
+   the off-axis under-sampling in one move — §2.5.
 6. **Calibrate the suppression constants** in `SuppressionModel` against
    drop-test coverage-level data. With Rothermel in place, a drop reaches spread
    rate through the published moisture-damping term, so the thing left to
@@ -483,7 +561,7 @@ residual 6 % gap in the head.
 | file | what it holds |
 |---|---|
 | `swarmfire/validation.py` | the `pyretechnics` adapter — coefficient extraction, `matched_world`, arrival maps from both codes, axis spread rates, IoU |
-| `scripts/validate_pyretechnics.py` | six modes: `coefficients`, `ros` (both models, one metric), `rothermel` (all 53 fuel models), `front`, `residence`, `area` |
+| `scripts/validate_pyretechnics.py` | seven modes: `coefficients`, `ros` (both models, one metric), `rothermel` (all 53 fuel models), `front`, `heading` (wind off the grid axes), `residence`, `area`; `--propagator ca` for the original tracker |
 | `tests/test_validation.py` | the exact identities as assertions, the current disagreement as regression guards |
 | `tests/test_rothermel.py` | `RothermelROS` and the fuel model table against the reference, cell by cell |
 

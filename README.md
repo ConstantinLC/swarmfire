@@ -12,15 +12,23 @@ This is a baseground for the development of an optimal automatic drone-based wil
 
 ![Free burn, helicopter and drone swarm on the same ignition](out/comparison.gif)
 
-The same fire under three regimes, sharing one ignition and one clock: grass,
-wind (5, 2) m/s, 192 × 192 cells at 30 m, 2.8 hours. The fleet is grounded for
-the first ten minutes (`dispatch_s = 600`), so all three panels are identical
-until it launches. The white cross is the vehicle, dimming as its tank empties
-and brightening on reload. Regenerate with:
+The same fire under three regimes, sharing one ignition and one clock: Rothermel
+spread over standard fuel model 102 (GR2, low-load dry-climate grass), level-set
+front tracking, wind (5, 2) m/s (19 km/h midflame, 22° north of east), 256 × 256
+cells at 30 m, 2.8 hours. The ignition sits upwind so the fire stays on the map.
+The fleet is grounded for the first ten minutes (`dispatch_s = 600`), so all
+three panels are identical until it launches. The white cross is the vehicle,
+dimming as its tank empties and brightening on reload. Regenerate with:
 
 ```bash
-python scripts/suppression_study.py compare --dispatch 600 --upscale 2 --record-every 20
+python scripts/suppression_study.py compare --ros rothermel --grid 256 --ignition 80 25 \
+    --dispatch 600 --upscale 2 --record-every 20
 ```
+
+Neither platform makes a dent in this fire: the scripted policy in
+`scripts/demo.py` aims at the most intense cell, which is already burning, and
+stacks all 32 drones on one point. That is the policy's failure, not the
+platforms' - see Caveats.
 
 ## How to get the code running ?
 
@@ -135,7 +143,7 @@ without touching anything else:
 | seam | now | next |
 |---|---|---|
 | `ROSModel` | `SimpleROS`, `RothermelROS` | LANDFIRE rasters feeding `RothermelROS` |
-| `Propagator` | `CAPropagator` | level set / minimum arrival time |
+| `Propagator` | `LevelSetPropagator` (default), `CAPropagator` | crown fire, spotting |
 | `Platform` | tanker, helicopter, 32-drone swarm | ground crews, dozer lines, refill logistics |
 | `SuppressionModel` | water, retardant | foam, gel, dose-response calibration |
 
@@ -168,9 +176,13 @@ pip install -e ".[real]"
 python scripts/validate_pyretechnics.py all --plot
 ```
 
-**With `RothermelROS`, burned area after two hours lands within about 30 % of
-the reference on every fuel** (IoU 0.78–0.89), against 45× too much on shrub and
-10× too little on timber for the `SimpleROS` presets. `ros/rothermel.py`
+**With `RothermelROS` and the level set, burned area after two hours lands
+within 2–8 % of the reference on grass and timber** (IoU 0.93–0.975), against
+40× too much on shrub and 10× too little on timber for the `SimpleROS` presets.
+The level set is `pyretechnics`' own front-tracking scheme, so the front runs at
+the ellipse's rate on any wind bearing; the original cellular automaton reached
+only 41 % as far downwind as the reference with a 19 km/h wind 22.5° off the
+grid axes. `ros/rothermel.py`
 implements Rothermel (1972) over the Anderson 13 and Scott & Burgan 40 fuel
 models and agrees with `pyretechnics` to float32 — worst relative error 3.7e-4,
 median 4.9e-5, across **13,920 directional comparisons** spanning every burnable
@@ -178,11 +190,11 @@ model, three moistures, twelve wind and slope combinations and all eight
 directions. [`VALIDATION.md`](VALIDATION.md) §1.1 has the breakdown.
 
 ```python
-from swarmfire import rothermel_world, RothermelROS, CAPropagator
+from swarmfire import rothermel_world, RothermelROS, LevelSetPropagator
 
 # A LANDFIRE fuel-model raster is the input this takes.
 state = rothermel_world(grid=(192, 192), fuel_model=102, moisture=0.06, wind=(3.0, 0.0))
-propagator = CAPropagator(RothermelROS())
+propagator = LevelSetPropagator(RothermelROS())
 ```
 
 The comparison is split so the two error sources do not hide each other. Giving
@@ -195,7 +207,9 @@ tracker:
 | `RothermelROS` vs the reference, all fuels and directions | **float32** — worst 3.7e-4 over 13,920 comparisons |
 | ellipse template (Anderson 1983) | **exact** — same formula, same coefficients in different units |
 | `SimpleROS` wind, slope and `ros0` coefficients | fuel-independent where Rothermel's are not: off by 0.25–8.6× |
-| front speed, identical ROS | head 94 %, back 107 %, flank **133 %**, IoU 0.89 |
+| front speed, identical ROS, level set | head 99 %, back 100 %, flank 100 %, IoU 0.975 |
+| front speed, identical ROS, CA | head 94 %, back 107 %, flank **133 %**, IoU 0.89 |
+| wind off the grid axes (22.5°, 5.4 m/s) | level set 98 % of the reference's reach, CA **41 %** |
 | front speed vs burnout time, vs resolution | **independent of both** |
 
 Getting there meant fixing three bugs in `propagate.py`, and one of them was
@@ -222,8 +236,9 @@ backward pass of every rollout, so `burned_area().backward()` never worked.
 4. Give the weather moistures a model. The 10-hour, 100-hour and live classes
    are `RothermelROS` constructor arguments; dead 1-hour is already per-cell,
    which is the one suppression moves.
-5. Finish the front tracker: the p-norm's 33 % flank overshoot and a few percent
-   of timestep drift now dominate the error budget.
+5. ~~Finish the front tracker~~ — **done**: `LevelSetPropagator` ports
+   `pyretechnics`' level set and is the default. See
+   [`VALIDATION.md`](VALIDATION.md) §2.5.
 6. Calibrate the suppression constants in `SuppressionModel` against drop-test
    coverage-level data.
 7. Re-run the suppression study. Every result below it predates all of this.
@@ -237,14 +252,24 @@ backward pass of every rollout, so `burned_area().backward()` never worked.
 - `RothermelROS` is surface spread only: no crown fire, no spotting, no
   fire-atmosphere feedback. It also reads `FireState.wind` as a midflame wind
   and so applies no canopy wind-adjustment factor.
-- `CAPropagator` moves the head at 94 % of the rate of spread it is given and
-  the flanks at 133 %, so fire shape is blunter than a real fire ellipse. Front
-  speed no longer depends on burnout time or on `cell_size`.
-- A burnt-out cell still drives its neighbours, so a suppressant barrier can be
-  crossed hours after the fire against it has gone out. `front_source` documents
-  the trade.
-- Explicit propagation is conditionally stable. `env.check_stability()` returns
-  the largest safe `dt`; call it after changing wind, fuel, or resolution.
+- `LevelSetPropagator` inherits the reference's one visible artefact: at high
+  length/breadth the head of the fire comes out flat-faced rather than rounded.
+  `pyretechnics` draws the same shape, and the two perimeters overlap.
+- `CAPropagator` is still available. It moves the head at 94 % of the rate of
+  spread it is given and the flanks at 133 %, and with the head between two
+  neighbour bearings it falls far behind - use it only on grid-aligned winds.
+  Under it, a burnt-out cell keeps driving its neighbours, so a suppressant
+  barrier can be crossed hours after the fire against it has gone out; the level
+  set has no such latch, because a cell's own spread rate decides whether the
+  front enters it.
+- Suppression barely works under the scripted policy. Most of its water lands
+  on cells that have already ignited, and a 20 L drone payload spread over a
+  30 m cell is below the dose that stops a front (about 170 L per cell). A
+  finer grid or a policy that groups drones is needed before the swarm can
+  build line.
+- Explicit propagation is conditionally stable: the front must move less than
+  0.4 cells per step, as in `pyretechnics`. `env.check_stability()` returns the
+  largest safe `dt`; call it after changing wind, fuel, or resolution.
 - Reload, empty-tank and dispatch gates are hard (non-differentiable) by
   nature. Drop position, heading, volume, and all of the physics are smooth.
 - `EnvConfig.dispatch_s` holds the fleet on the ground for the first

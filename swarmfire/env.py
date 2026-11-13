@@ -28,8 +28,8 @@ from torch import Tensor
 
 from . import fuels
 from .platforms import Platform, make_platform
-from .propagate import CAPropagator, Propagator
-from .ros import ROSModel, SimpleROS
+from .propagate import LevelSetPropagator, Propagator
+from .ros import RothermelROS, ROSModel, SimpleROS
 from .state import FireState, ignite
 from .suppression import SuppressionModel
 
@@ -75,7 +75,7 @@ class FireEnv:
         )
         self.suppression = suppression or SuppressionModel()
         self.ros_model = ros_model or SimpleROS()
-        self.propagator = propagator or CAPropagator(self.ros_model, self.suppression)
+        self.propagator = propagator or LevelSetPropagator(self.ros_model, self.suppression)
         self.state: FireState
         self._step = 0
         self._prev_burned: Tensor
@@ -95,6 +95,13 @@ class FireEnv:
         )
         if cfg.heterogeneous:
             kwargs["seed"] = cfg.seed
+        elif isinstance(self.ros_model, RothermelROS):
+            # Take the summary layers (ros0, burn_rate, ...) from Rothermel too,
+            # so they agree with the spread model instead of the hand-set preset.
+            builder = fuels.rothermel_world
+            kwargs["fuel_model"] = fuels.FUEL_MODEL_FOR_PRESET[cfg.preset]
+            kwargs["moisture"] = fuels.PRESETS[cfg.preset].moisture
+            kwargs["ros_model"] = self.ros_model
         else:
             kwargs["preset"] = cfg.preset
         state = builder(**kwargs)
@@ -227,5 +234,5 @@ class FireEnv:
         changing wind, fuel, or resolution - an unstable step shows up as a
         fire that spreads faster than any wind justifies.
         """
-        limit = self.ros_model.max_stable_dt(self.state)
+        limit = self.propagator.max_stable_dt(self.state)
         return limit, self.cfg.dt <= limit

@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from demo import head_seeking_policy  # noqa: E402
 
 from swarmfire import EnvConfig, FireEnv, render  # noqa: E402
+from swarmfire.ros import RothermelROS, SimpleROS  # noqa: E402
 
 DROP_THRESHOLD_L = 1.0  # a load delta below this is numerical dust, not a drop
 
@@ -51,8 +52,10 @@ def make_env(args, dispatch_s: float = 0.0, platform: str | None = None) -> Fire
         device=args.device,
         dt=args.dt,
         dispatch_s=dispatch_s,
+        ignition=tuple(args.ignition) if args.ignition else None,
     )
-    env = FireEnv(platform or args.platform, config=cfg)
+    ros_model = RothermelROS() if args.ros == "rothermel" else SimpleROS()
+    env = FireEnv(platform or args.platform, ros_model=ros_model, config=cfg)
     env.reset()
     return env
 
@@ -285,7 +288,11 @@ def main():
     ap.add_argument("--steps", type=int, default=2500)
     ap.add_argument("--dt", type=float, default=4.0)
     ap.add_argument("--wind", type=float, nargs=2, default=[5.0, 2.0])
+    ap.add_argument("--ignition", type=int, nargs=2, default=None, metavar=("ROW", "COL"),
+                    help="ignition cell, row counted northward; defaults to the grid centre")
     ap.add_argument("--preset", default="grass")
+    ap.add_argument("--ros", choices=["simple", "rothermel"], default="simple",
+                    help="spread model; rothermel runs the preset's standard fuel model")
     ap.add_argument("--lead", type=float, default=0.0, help="cells to aim downwind of the head")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--record-every", type=int, default=12, help="steps between recorded frames")

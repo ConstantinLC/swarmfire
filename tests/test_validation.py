@@ -17,11 +17,22 @@ The whole module skips without the reference installed:
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 import torch
 
-from swarmfire import PRESETS, CAPropagator, SimpleROS, uniform_world, validation as V
+from swarmfire import (
+    PRESETS,
+    CAPropagator,
+    LevelSetPropagator,
+    RothermelROS,
+    SimpleROS,
+    rothermel_world,
+    uniform_world,
+    validation as V,
+)
 from swarmfire.ros.simple import length_to_breadth
 
 pytestmark = pytest.mark.skipif(
@@ -114,6 +125,8 @@ def flat_grass_fronts():
             GRASS, grid, cell, (wind, 0.0), residence_s=residence, device=DEVICE
         )
         fronts[label] = V.swarmfire_arrival_map(state, CAPropagator(ros_model), duration, dt)
+    state, ros_model, _ = V.matched_world(GRASS, grid, cell, (wind, 0.0), device=DEVICE)
+    fronts["levelset"] = V.swarmfire_arrival_map(state, LevelSetPropagator(ros_model), duration, dt)
     return reference, fronts, cell, duration, V.rothermel_point(GRASS, wind, 0.0)
 
 
@@ -188,3 +201,43 @@ def test_front_moves_when_residence_is_shorter_than_a_cell_crossing():
     head = V.axis_spread_rates(arrival, cell_size=20.0)["head"]
     reference = V.rothermel_point(GRASS, 3.0, 0.0).head_ros
     assert head == pytest.approx(reference, rel=0.10)
+
+
+# ------------------------------------------------------------------ level set
+
+
+def test_level_set_front_matches_the_reference(flat_grass_fronts):
+    """Same scheme as the reference, so every axis lands, flanks included.
+
+    Measured: head 0.986, back 0.997, flank 1.017 of the reference, IoU 0.944 -
+    against 0.942, 1.083, 1.345 and 0.877 for the CA on the same run.
+    """
+    reference, fronts, cell, duration, _ = flat_grass_fronts
+    ours = V.axis_spread_rates(fronts["levelset"], cell_size=cell)
+    theirs = V.axis_spread_rates(reference, cell_size=cell)
+
+    for axis in ("head", "back", "flank"):
+        assert ours[axis] == pytest.approx(theirs[axis], rel=0.05), axis
+    assert V.iou(fronts["levelset"], reference, duration) > 0.92
+
+
+def test_level_set_front_matches_the_reference_off_the_grid_axes():
+    """The wind turned 22.5 degrees - halfway between two neighbour bearings.
+
+    Every other scenario here blows due east, the one direction a grid-bound
+    tracker samples exactly. Measured on this run: IoU 0.923 for the level set
+    against 0.937 for the same fire due east, and 0.684 for the CA against its
+    own 0.874. The residual is the ignition, which the two codes seed
+    differently and which weighs more on a one-hour fire than a two-hour one.
+    """
+    grid, cell, wind, duration, bearing = (160, 160), 20.0, 3.0, 3600.0, 22.5
+    reference = V.pyretechnics_arrival_map(GRASS, grid, cell, wind, duration, wind_bearing=bearing)
+
+    b = math.radians(bearing)
+    model = RothermelROS()
+    state = rothermel_world(
+        grid=grid, fuel_model=GRASS, cell_size=cell,
+        wind=(wind * math.cos(b), wind * math.sin(b)), device=DEVICE, ros_model=model,
+    )
+    arrival = V.swarmfire_arrival_map(state, LevelSetPropagator(model), duration, 5.0)
+    assert V.iou(arrival, reference, duration) > 0.90

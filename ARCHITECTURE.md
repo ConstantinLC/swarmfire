@@ -43,7 +43,7 @@ print(out["burned_ha"].mean())
 | `platform` | `make_platform("helicopter")` | `"tanker"`, `"drone_swarm"`, or a `Platform` instance |
 | `ros_model` | `SimpleROS()` | `RothermelROS()`, `ConstantROS()` |
 | `suppression` | `SuppressionModel()` | a re-parameterised `SuppressionModel` |
-| `propagator` | `CAPropagator(ros_model, suppression)` | any `Propagator` subclass |
+| `propagator` | `LevelSetPropagator(ros_model, suppression)` | `CAPropagator`, or any `Propagator` subclass |
 | `config` | `EnvConfig()` | see below |
 
 Note the wiring: **the propagator is constructed from the ROS model and the
@@ -107,12 +107,12 @@ swarm = make_platform("drone_swarm", n_agents=64, dispatch_s=600)
 ### 1.5 Hand-assembling every component
 
 ```python
-from swarmfire import (FireEnv, EnvConfig, SimpleROS, CAPropagator,
+from swarmfire import (FireEnv, EnvConfig, SimpleROS, LevelSetPropagator,
                        SuppressionModel, make_platform)
 
 ros  = SimpleROS(wind_a=2.5, wind_b=1.5, slope_c=5.5)
 supp = SuppressionModel(water_to_moisture=0.8, water_tau_fire=60.0, retardant_efficacy=0.95)
-prop = CAPropagator(ros, supp, pnorm=6.0, arrival_softness=0.08)
+prop = LevelSetPropagator(ros, supp, arrival_softness=0.08)
 
 env = FireEnv(
     platform=make_platform("tanker", dispatch_s=1800),
@@ -131,11 +131,11 @@ env = FireEnv(
 suppressant into the run:
 
 ```python
-from swarmfire import uniform_world, ignite, CAPropagator, SimpleROS, SuppressionModel
+from swarmfire import uniform_world, ignite, LevelSetPropagator, SimpleROS, SuppressionModel
 
 state = uniform_world(batch=4, grid=(192, 192), preset="grass", wind=(5.0, 2.0), device="cuda")
 state = ignite(state, 96, 96)
-prop  = CAPropagator(SimpleROS(), SuppressionModel())
+prop  = LevelSetPropagator(SimpleROS(), SuppressionModel())
 
 for _ in range(2000):
     state = prop.step(state, dt=4.0).detach()
@@ -236,7 +236,7 @@ graph TD
     end
 
     subgraph physics [physics]
-        Propagator[Propagator ABC → CAPropagator<br/>propagate.py]
+        Propagator[Propagator ABC → LevelSetPropagator<br/>· CAPropagator · propagate.py]
         ROS[ROSModel ABC → SimpleROS<br/>ConstantROS · RothermelROS]
         Supp[SuppressionModel<br/>suppression.py]
         grid[grid.py<br/>shift · neighbor_* · slope_vector]
@@ -293,7 +293,7 @@ tensor) and `t [B]` elapsed seconds.
 deliberate, and the reason new physics means a new channel here rather than a
 new code path elsewhere.
 
-**Called by.** Everything. `FireEnv` holds one; `CAPropagator`, `SimpleROS`,
+**Called by.** Everything. `FireEnv` holds one; both propagators, `SimpleROS`,
 `SuppressionModel`, `Platform` and `render` all read it and return new
 instances via `replace`.
 
@@ -338,13 +338,22 @@ direction tensor in the package follows; `N_DIRS = 8`.
 ### 2.5 `ROSModel` (ABC) — `ros/base.py`
 
 **The seam that makes the project's realism roadmap a one-line change.**
-Contract: `__call__(state) -> [B, 8, H, W]` spread rates in m/s, one per Moore
-direction, in `NEIGHBOR_OFFSETS` order. Nothing downstream knows how the number
-was produced.
+Contract, two methods over one fire ellipse:
+
+* `__call__(state) -> [B, 8, H, W]` spread rates in m/s, one per Moore
+  direction, in `NEIGHBOR_OFFSETS` order — the ellipse sampled at the eight
+  neighbour bearings. What `CAPropagator` reads.
+* `ellipse(state) -> SpreadEllipse` — the ellipse itself: `head_ros [B,H,W]`
+  m/s, unit `heading [B,3,H,W]` (east, north, rise) on the slope-tangential
+  plane, and `length_to_breadth [B,H,W]`. What `LevelSetPropagator` reads, to
+  evaluate the ellipse along whatever direction the front faces.
+
+Nothing downstream knows how the numbers were produced.
 
 `max_stable_dt(state, courant=0.4)` is concrete on the base class: it evaluates
 `self(state)`, divides by `neighbor_distances`, and returns `courant / peak`.
-Called by `CAPropagator.max_stable_dt` and by `FireEnv.check_stability`.
+Called by `CAPropagator.max_stable_dt`; `LevelSetPropagator` bounds by the head
+rate instead.
 
 **Implementations.**
 
@@ -384,7 +393,9 @@ transferable. `max_eccentricity` caps the cigar shape at extreme wind purely
 for numerical sanity.
 
 **Calls.** `grid.slope_vector`, `grid.neighbor_angles`, `length_to_breadth`,
-`FireState`. **Called by.** `CAPropagator.step`, `ROSModel.max_stable_dt`.
+`FireState`. **Called by.** `CAPropagator.step` (`__call__`),
+`LevelSetPropagator.step` (`ellipse`, which lifts the heading onto the slope
+plane), `ROSModel.max_stable_dt`.
 
 ### 2.7 `SuppressionModel` — `suppression.py`
 
@@ -395,8 +406,8 @@ moisture, which the spread physics already depends on.
 | method | does | called by |
 |---|---|---|
 | `effective_moisture(state)` | `moisture + water_to_moisture * water` | `flammability` |
-| `flammability(state)` | `[B,H,W]` in [0,1]: sigmoid gate around `moisture_ext`, times `1 - retardant_efficacy * retardant`. **The only channel through which suppression touches spread.** | `CAPropagator.step` (twice — once on the drive, once on combustion) |
-| `update(state, dt)` | evaporates water (`1/τ_ambient + intensity/τ_fire`, so flame boils it off in minutes) and ages retardant (τ = 12 h) | last line of `CAPropagator.step` |
+| `flammability(state)` | `[B,H,W]` in [0,1]: sigmoid gate around `moisture_ext`, times `1 - retardant_efficacy * retardant`. **The only channel through which suppression touches spread.** | `Propagator.step` (twice — once on the spread rate, once on combustion) |
+| `update(state, dt)` | evaporates water (`1/τ_ambient + intensity/τ_fire`, so flame boils it off in minutes) and ages retardant (τ = 12 h) | last line of `Propagator.step`, via `_Combustion.burn` |
 | `deposit(state, water, retardant)` *(static)* | adds platform output into the layers; retardant clamped to 1 | `FireEnv.step`, deliberately kept out of `update` so the policy's action enters the state at one identifiable point |
 
 Water and retardant differ exactly as they do operationally: water is strong
@@ -405,13 +416,35 @@ the fire. That asymmetry is the whole control problem. `softness` keeps the
 extinction transition differentiable — set it small, never zero, or gradients
 through the suppression decision vanish.
 
-**Calls.** `FireState` only. **Called by.** `CAPropagator` (constructor
+**Calls.** `FireState` only. **Called by.** both propagators (constructor
 argument), `FireEnv`.
 
-### 2.8 `Propagator` (ABC) and `CAPropagator` — `propagate.py`
+### 2.8 `Propagator` (ABC), `LevelSetPropagator` and `CAPropagator` — `propagate.py`
 
-**Contract.** `step(state, dt) -> FireState`. One stencil plus elementwise
-algebra, no Python loop over the batch.
+**Contract.** `step(state, dt) -> FireState` and `max_stable_dt(state)`.
+Stencils plus elementwise algebra, no Python loop over the batch. Both
+implementations share `_Combustion` — `combustion(state, flammability)` and
+`burn(state, flammability, dt)`, which consume fuel behind the front, advance
+the clock and age the suppressant — and differ only in how `ignition` crosses 1.
+
+**`LevelSetPropagator(ros_model, suppression, arrival_softness=0.08,
+fuel_floor=0.03, fuel_softness=0.03)`** — the default. A port of
+`pyretechnics`' Eulerian level set. `ignition` is the level-set function
+(`phi = 1 - ignition`; the front is `ignition = 1`), so nothing that reads
+`ignition` needs to know which propagator produced it.
+
+| method | does |
+|---|---|
+| `_wavelet(state, flammability)` | once per step: `ros_model.ellipse(state)`, head rate times flammability, and the shape-only coefficients of Richards' elliptical wavelet (`a = -e/(1+e)`, `b = -1/((1+e)L)`, `c = L²-1`), plus the terrain gradient |
+| `_dphi_dt(phi, wave, cell)` | central gradient for the front normal; its squared magnitude on the slope plane; the wavelet's normal speed; times `pyretechnics`' flux-limiter correction (superbee, `_flux_limited_difference`). The square root and the correction are masked where the gradient vanishes, which is almost everywhere, so the backward pass stays finite. Neighbours come from `_neighbour`, which pads with `phi = 1` (unburnt) |
+| `step(state, dt)` | Heun RK2 on `phi`, then `_Combustion.burn` |
+| `max_stable_dt(state)` | `0.4 · cell_size / max head rate` — `pyretechnics`' `max_cells_per_timestep` |
+
+Suppression enters through the spread rate: the front enters a cell at *that
+cell's* rate, so a soaked cell ahead of the front stops it and a burnt-out cell
+behind it has no say. Measured against the reference: head, back and flank
+within 2 %, direction-independent, and flat in `dt` —
+[`VALIDATION.md`](VALIDATION.md) §2.5.
 
 **`CAPropagator(ros_model, suppression, pnorm=6, arrival_softness=0.08,
 fuel_floor=0.03, fuel_softness=0.03)`** — holds references to a `ROSModel` and
@@ -420,9 +453,14 @@ a `SuppressionModel`, which is where the two seams get plugged together.
 | method | does |
 |---|---|
 | `ignition_drive(state, ros)` | `[B,H,W]` rate at which the front closes on each cell. A neighbour at distance `L` burning at intensity `I` and spreading at `R` contributes `I·R/L`, so `ignition` reaches 1 after exactly the physical travel time `L/R`. Neighbour contributions combine with a **smooth p-norm**, not a sum — summing would let a cell with three lit neighbours ignite three times too fast, showing up as corners of the fire outrunning the flanks. Spelled as `torch.linalg.vector_norm`, *not* as `.pow(p).sum().pow(1/p)`: the two agree forward, but the hand-rolled form differentiates to infinity at a cell with no lit neighbour and put a NaN through the backward pass of every rollout. Calls `grid.shift` and `grid.neighbor_distances`. |
-| `combustion(state, flammability)` | `[B,H,W]` intensity = `soft_gate(ignition, 1) · soft_gate(fuel, fuel_floor) · flammability`. `soft_gate` is a sigmoid normalised to reach **exactly** zero — a plain sigmoid leaves every unlit cell smouldering at `3.7e-6` and, worse, leaves a cell with *no fuel left* at `0.269`, which kept driving its neighbours forever. The flammability factor is why water on an *already burning* cell puts it out, and why the cell relights once the water evaporates if fuel remains. |
-| `step(state, dt)` | the sequence in §2.12 |
+| `combustion(state, flammability)` *(shared, from `_Combustion`)* | `[B,H,W]` intensity = `soft_gate(ignition, 1) · soft_gate(fuel, fuel_floor) · flammability`. `soft_gate` is a sigmoid normalised to reach **exactly** zero — a plain sigmoid leaves every unlit cell smouldering at `3.7e-6` and, worse, leaves a cell with *no fuel left* at `0.269`, which kept driving its neighbours forever. The flammability factor is why water on an *already burning* cell puts it out, and why the cell relights once the water evaporates if fuel remains. |
+| `step(state, dt)` | `ignition += dt * ignition_drive * flammability`, then `_Combustion.burn` |
 | `max_stable_dt(state)` | passthrough to `self.ros_model.max_stable_dt` |
+
+**`CAPropagator`** is kept for its history and because it is cheaper, but it can
+only spread along the eight neighbour bearings: with a 5.4 m/s wind 22.5° off
+the grid it reaches 41 % as far downwind as the reference
+([`VALIDATION.md`](VALIDATION.md) §2.4).
 
 **Why `ignition` exists at all.** The tempting alternative — integrate
 `intensity` with a self-feeding term — is autocatalytic: any cell that picks up
@@ -447,8 +485,9 @@ family: at `pnorm=6` the flanks run 33 % fast, and no value fixes the flanks
 without breaking the head.
 
 **Calls.** `ROSModel`, `SuppressionModel`, `grid.shift`,
-`grid.neighbor_distances`, `FireState.replace`. **Called by.** `FireEnv.step`,
-and directly by `scripts/suppression_study.py` for the true free burn.
+`grid.neighbor_distances`, `grid.slope_vector`, `FireState.replace`. **Called
+by.** `FireEnv.step`, and directly by `scripts/suppression_study.py` for the
+true free burn.
 
 ### 2.9 `PlatformSpec`, `Platform` and subclasses — `platforms.py`
 
@@ -514,14 +553,14 @@ holds `cfg`, `platform`, `suppression`, `ros_model`, `propagator`, the current
 
 | method | does | calls |
 |---|---|---|
-| `__init__` | fills in missing components | `make_platform`, `SuppressionModel`, `SimpleROS`, `CAPropagator` |
-| `reset()` | builds a world, lights it, resets the fleet, returns the first observation | `fuels.uniform_world` / `fuels.patchy_world`, `state.ignite`, `Platform.reset`, `FireState.burned_area`, `self.observe` |
+| `__init__` | fills in missing components | `make_platform`, `SuppressionModel`, `SimpleROS`, `LevelSetPropagator` |
+| `reset()` | builds a world, lights it, resets the fleet, returns the first observation | `fuels.uniform_world` / `fuels.patchy_world` (or `fuels.rothermel_world` when `ros_model` is a `RothermelROS`), `state.ignite`, `Platform.reset`, `FireState.burned_area`, `self.observe` |
 | `observe()` | `{"grid": [B,11,H,W], "fleet": [B,N,5]}` | `FireState.stack`, `Platform.position/load/cooldown`, `Platform.dispatch_fraction` |
 | `action_dim` / `n_agents` | passthroughs | `Platform.action_dim`, `spec.n_agents` |
 | `zero_action()` | a `[B,N,A]` action with release at −1 | — (see §1.6: this is a drizzle, not silence) |
 | `step(action, detach=True)` | one timestep → `(obs, reward, done, info)` | see §2.12 |
 | `rollout(policy, steps, detach, record)` | loop to the horizon or until every fire is out; `policy=None` runs `zero_action` | `self.step`, `FireState.stack` when recording |
-| `check_stability()` | `(max safe dt, is cfg.dt safe)` | `ROSModel.max_stable_dt` |
+| `check_stability()` | `(max safe dt, is cfg.dt safe)` | `Propagator.max_stable_dt` |
 
 ### 2.11 `render.py` and `gym_wrapper.py`
 
@@ -549,17 +588,21 @@ is thrown away, so it is a cross-check, not a training path.
    * `Platform.on_station(state)` — reads `state.t` against `spec.dispatch_s`
    * `self.footprint(action, state)` → `soft_disc` or `soft_capsule`
 2. **`SuppressionModel.deposit(state, water, retardant)`** → `state.replace(...)`
-3. **`CAPropagator.step(state, dt)`**
+3. **`LevelSetPropagator.step(state, dt)`**
    1. `SuppressionModel.flammability(state)` → `effective_moisture(state)`
-   2. `ros_model(state)` → `SimpleROS.__call__` → `_drive` → `grid.slope_vector`;
-      then `length_to_breadth` and `grid.neighbor_angles`
-   3. `ignition_drive(state, ros)` → `grid.neighbor_distances`, 8 × `grid.shift`,
-      p-norm over directions
-   4. `ignition += dt * drive * flammability` → `state.replace`
+   2. `_wavelet` → `ros_model.ellipse(state)` → `SimpleROS._drive` →
+      `grid.slope_vector`; then `length_to_breadth`
+   3. `phi = 1 - ignition`; `k1 = _dphi_dt(phi)`, `k2 = _dphi_dt(phi + dt·k1)`
+      — each a handful of `_neighbour` reads, the wavelet and the flux limiter
+   4. `ignition = 1 - (phi + dt·(k1 + k2)/2)` → `state.replace`
    5. `combustion(state, flammability)` → new `intensity`
    6. `consumed = min(dt * intensity * burn_rate, fuel)`; update `fuel`,
       `burned`, `t` → `state.replace`
    7. `SuppressionModel.update(state, dt)` — evaporate water, age retardant
+
+   `CAPropagator.step` differs only in 2–4: `ros_model(state)` gives eight
+   directional rates, `ignition_drive` combines them over the eight neighbours
+   with a p-norm, and `ignition += dt * drive * flammability`.
 4. **if `detach`**: `FireState.detach()` and `Platform.detach()`
 5. **reward** — `state.burned_area()` minus the previous value, minus
    `water_cost_per_kl × kL` (water only)
@@ -574,7 +617,7 @@ Read top to bottom, that is the entire simulator.
 
 | you want | do this | nothing else moves |
 |---|---|---|
-| a correct front speed | **do this first** — see [`VALIDATION.md`](VALIDATION.md) §2. Decouple arrival from `intensity`; replace the p-norm with a fastest-path update | `Propagator` contract is unchanged |
+| a correct front speed | **done** — `LevelSetPropagator`, [`VALIDATION.md`](VALIDATION.md) §2.5 | it is the default |
 | real fire physics | **done** — `RothermelROS` plus `fuels.rothermel_world` | pass `ros_model=RothermelROS()` |
 | real landscapes | load a LANDFIRE fuel-model raster into `FireState.fuel_model` and a DEM into `elevation` | `RothermelROS` already reads both |
 | real landscapes | load LANDFIRE rasters into `fuels.py` instead of `PRESETS` | `FireState` layout is unchanged |

@@ -397,11 +397,14 @@ def pyretechnics_arrival_map(
     slope: float = 0.0,
     moisture: dict[str, float] | None = None,
     ignition: tuple[int, int] | None = None,
+    wind_bearing: float = 0.0,
 ) -> np.ndarray:
     """Same map from the reference level-set solver. Seconds, NaN where unburnt.
 
     Wind blows east and terrain rises to the east, matching the sign convention
-    the rest of this module uses.
+    the rest of this module uses. `wind_bearing` turns the wind, in degrees
+    counter-clockwise from east - the `atan2(north, east)` convention of
+    `grid.py` - so the same fire can be run off the grid axes.
     """
     _require()
     moisture = moisture or STANDARD_MOISTURE
@@ -422,8 +425,8 @@ def pyretechnics_arrival_map(
         "canopy_base_height": cube(0.0),
         "canopy_bulk_density": cube(0.0),
         "wind_speed_10m": cube(midflame_to_wind_10m(midflame_wind, fuel_model)),
-        # Wind *from* the west, i.e. blowing east.
-        "upwind_direction": cube(270.0),
+        # Compass bearing the wind blows *from*: 270 (from the west) blows east.
+        "upwind_direction": cube((270.0 - wind_bearing) % 360.0),
         "fuel_moisture_dead_1hr": cube(moisture["dead_1hr"]),
         "fuel_moisture_dead_10hr": cube(moisture["dead_10hr"]),
         "fuel_moisture_dead_100hr": cube(moisture["dead_100hr"]),

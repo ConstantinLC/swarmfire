@@ -11,6 +11,9 @@ surface spread with an Eulerian level-set front tracker. Four modes:
     front         the propagator on trial. Both codes are given the *same*
                   directional rate of spread (see `validation.matched_world`),
                   so any disagreement is front tracking rather than physics.
+    heading       the same fire with the wind turned off the grid axes. Every
+                  other mode blows due east, which is the one direction a
+                  grid-bound tracker gets right.
     residence     front speed against flame residence time and against grid
                   resolution - two things it must not depend on, and used to.
     area          the bottom line: burned area after two hours, package as
@@ -28,6 +31,7 @@ Requires the reference: pip install "swarmfire[real]".
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +40,7 @@ import torch
 from swarmfire import (
     PRESETS,
     CAPropagator,
+    LevelSetPropagator,
     SimpleROS,
     rothermel_world,
     uniform_world,
@@ -322,9 +327,10 @@ def front(args) -> None:
     maps = {"pyretechnics": reference}
 
     real_ros = _rothermel(args)
+    name = "CA" if args.propagator == "ca" else "level set"
     runs = [
         (
-            "swarmfire CA, RothermelROS",
+            f"swarmfire {name}, RothermelROS",
             rothermel_world(
                 grid=grid, fuel_model=fuel_model, moisture=moisture, cell_size=args.cell,
                 wind=(args.wind, 0.0), device=args.device, ros_model=real_ros,
@@ -335,7 +341,7 @@ def front(args) -> None:
     matched_state, matched_ros, _ = V.matched_world(
         fuel_model, grid, args.cell, (args.wind, 0.0), moisture=args.moisture, device=args.device
     )
-    runs.append(("swarmfire CA, matched SimpleROS", matched_state, matched_ros))
+    runs.append((f"swarmfire {name}, matched SimpleROS", matched_state, matched_ros))
 
     # The target: what the ROS model returns for these three headings, in closed
     # form. Nothing is simulated to get this - it is the number the propagator is
@@ -367,7 +373,7 @@ def front(args) -> None:
         f"   {axes['head'] / prescribed['head']:11.2f}"
     )
     for label, state, model in runs:
-        arrival = V.swarmfire_arrival_map(state, CAPropagator(model), duration, args.dt)
+        arrival = V.swarmfire_arrival_map(state, _propagator(args, model), duration, args.dt)
         a = V.axis_spread_rates(arrival, cell_size=args.cell)
         print(
             f"{'  ' + label:32} {_rate(a['head'])} {_rate(a['flank'])} {_rate(a['back'])}"
@@ -382,15 +388,87 @@ def front(args) -> None:
         "reference delivers what it was asked to within a percent, which is how\n"
         "you know the yardstick works.\n"
         "\nThe two swarmfire rows agree, which is the point of running both: the\n"
-        "residual is the front tracker and not the rate-of-spread model. Head\n"
-        "lands about 6 percent low and back 8 percent high; the flank runs about a\n"
-        "third fast, because eight-neighbour contributions combine with a p-norm\n"
-        "rather than along the fastest path. That is the remaining known defect\n"
-        "in this class, and it is what the perimeter figure shows as a fire that\n"
-        "is too fat and too blunt where the reference is a teardrop."
+        "residual is the front tracker and not the rate-of-spread model."
     )
+    if args.propagator == "ca":
+        print(
+            "Head lands about 6 percent low and back 8 percent high; the flank runs\n"
+            "about a third fast, because eight-neighbour contributions combine with\n"
+            "a p-norm rather than along the fastest path. The perimeter figure shows\n"
+            "it as a fire too fat and too blunt where the reference is a teardrop.\n"
+            "Off the grid axes it is worse - see `heading`."
+        )
+    else:
+        print(
+            "The level set is the reference's own scheme, and head, flank and back\n"
+            "all land within about 1 percent of what they were asked for. The IoU\n"
+            "residual is the ignition: the two codes seed the fire differently."
+        )
     if args.plot:
         _plot_front(maps, duration, args.cell)
+
+
+def _downwind_reach(arrival: np.ndarray, bearing_deg: float, cell_size: float, time_s: float) -> float:
+    """Furthest burned cell along the wind bearing at `time_s`, metres."""
+    h, w = arrival.shape
+    ys, xs = np.nonzero(np.isfinite(arrival) & (arrival <= time_s))
+    b = math.radians(bearing_deg)
+    return float(((xs - w // 2) * math.cos(b) + (ys - h // 2) * math.sin(b)).max() * cell_size)
+
+
+def heading(args) -> None:
+    """The front with the wind off the grid axes, against the reference.
+
+    Everything else in this harness blows due east, where the head lands on a
+    neighbour bearing and a cellular automaton samples the ellipse exactly.
+    Between two bearings it does not: the eight rates it can use are the
+    ellipse's value 22.5 degrees either side of the head, which for a long thin
+    ellipse is a fraction of the head rate. The head rate itself is fixed by
+    physics and does not care which way the grid runs.
+    """
+    fuel_model = V.FUEL_EQUIVALENTS[args.preset]
+    grid = (args.grid, args.grid)
+    duration = args.minutes * 60.0
+    model = _rothermel(args)
+
+    _rule(
+        f"Front vs wind bearing, {args.preset} / FM{fuel_model}, {args.wind} m/s midflame, flat"
+    )
+    print(f"grid {args.grid}x{args.grid} at {args.cell:g} m, {args.minutes:g} min, dt {args.dt:g} s")
+    print("reach: furthest burned cell along the wind bearing, as a fraction of the reference's\n")
+    print(
+        f"{'bearing':>8} {'ref ha':>8} | {'level set':>10} {'reach':>6} {'IoU':>6}"
+        f" | {'CA':>10} {'reach':>6} {'IoU':>6}"
+    )
+    cell_area_ha = args.cell**2 / 1e4
+    for bearing in (0.0, 22.5, 45.0, 67.5, 90.0):
+        reference = V.pyretechnics_arrival_map(
+            fuel_model, grid, args.cell, args.wind, duration,
+            moisture=args.moisture, wind_bearing=bearing,
+        )
+        b = math.radians(bearing)
+        state = rothermel_world(
+            grid=grid, fuel_model=fuel_model, moisture=args.moisture["dead_1hr"],
+            cell_size=args.cell, wind=(args.wind * math.cos(b), args.wind * math.sin(b)),
+            device=args.device, ros_model=model,
+        )
+        ref_reach = _downwind_reach(reference, bearing, args.cell, duration)
+        row = f"{bearing:8.1f} {np.isfinite(reference).sum() * cell_area_ha:8.1f}"
+        for propagator in (LevelSetPropagator(model), CAPropagator(model)):
+            arrival = V.swarmfire_arrival_map(state, propagator, duration, args.dt)
+            reach = _downwind_reach(arrival, bearing, args.cell, duration) / ref_reach
+            row += (
+                f" | {np.isfinite(arrival).sum() * cell_area_ha:10.1f} {reach:6.2f}"
+                f" {V.iou(arrival, reference, duration):6.3f}"
+            )
+        print(row)
+
+    print(
+        "\nThe reference and the level set are indifferent to the bearing, as the\n"
+        "physics is. The CA is right on the axes and the diagonals and slow in\n"
+        "between, by more the stronger the wind: the ellipse lengthens with wind,\n"
+        "and a longer ellipse falls off faster either side of its head."
+    )
 
 
 def _plot_front(maps, duration, cell_size) -> None:
@@ -414,7 +492,7 @@ def _plot_front(maps, duration, cell_size) -> None:
     for ax, (label, arrival) in zip(axes, maps.items()):
         ax.contourf(arrival[y0:y1, x0:x1] / 60.0, levels=levels, cmap="inferno")
         ax.contour(arrival[y0:y1, x0:x1] / 60.0, levels=levels, colors="k", linewidths=0.3)
-        ax.set_title(label.replace("swarmfire CA, ", "swarmfire: "), fontsize=9)
+        ax.set_title(label.replace(", ", ": ", 1), fontsize=9)
         ax.set_aspect("equal")
         ax.set_xticks([])
         ax.set_yticks([])
@@ -430,7 +508,7 @@ def _plot_front(maps, duration, cell_size) -> None:
             best[1][y0:y1, x0:x1] / 60.0, levels=[minutes], colors="C3", linewidths=1.1,
             linestyles="--",
         )
-    overlay.set_title("perimeters: reference (black)\nvs " + best[0].replace("swarmfire CA, ", "swarmfire "), fontsize=9)
+    overlay.set_title("perimeters: reference (black)\nvs " + best[0].split(",")[0], fontsize=9)
     overlay.set_aspect("equal")
     overlay.set_xticks([])
     overlay.set_yticks([])
@@ -489,7 +567,7 @@ def residence(args) -> None:
     burn_rate = torch.tensor([1.0 / t for t in times], device=state.device).view(-1, 1, 1)
     state = state.replace(burn_rate=torch.ones_like(state.burn_rate) * burn_rate)
 
-    arrival = V.swarmfire_arrival_map(state, CAPropagator(ros_model), duration, args.dt)
+    arrival = V.swarmfire_arrival_map(state, _propagator(args, ros_model), duration, args.dt)
     print(f"{'residence s':>12} {'residence/travel':>17} {'head m/s':>10} {'fraction of ROS':>17}")
     fractions = []
     for t, layer in zip(times, arrival):
@@ -522,7 +600,7 @@ def residence(args) -> None:
             residence_s=PRESETS[args.preset].residence,
             device=args.device,
         )
-        arrival = V.swarmfire_arrival_map(state, CAPropagator(ros_model), duration, step)
+        arrival = V.swarmfire_arrival_map(state, _propagator(args, ros_model), duration, step)
         head = V.axis_spread_rates(arrival, cell_size=cell)["head"]
         crossing = cell / reference.head_ros
         fraction = "  stalled" if not np.isfinite(head) else f"{head / reference.head_ros:9.2f}"
@@ -534,8 +612,8 @@ def residence(args) -> None:
         "\nAlso flat, across a four-fold range of cell size. `EnvConfig.cell_size`\n"
         "defaults to 30 m to match LANDFIRE rasters; that row used to read 0.45\n"
         "against 0.95 at 10 m, which meant the simulator was reporting its grid\n"
-        "rather than its fuel. The residual 5 percent is the arrival-threshold\n"
-        "ramp - see the `dt` and softness notes in VALIDATION.md - not resolution."
+        "rather than its fuel. What is left - 1 percent for the level set, 5 for\n"
+        "the CA - is the tracker, not resolution."
     )
 
     if args.plot:
@@ -613,14 +691,14 @@ def area(args) -> None:
                     cell_size=args.cell, wind=(wind, 0.0), device=args.device,
                     ros_model=_rothermel(args),
                 ),
-                CAPropagator(_rothermel(args)), duration, args.dt,
+                _propagator(args, _rothermel(args)), duration, args.dt,
             )
             toy = V.swarmfire_arrival_map(
                 uniform_world(
                     batch=1, grid=grid, preset=preset, cell_size=args.cell,
                     wind=(wind, 0.0), device=args.device,
                 ),
-                CAPropagator(SimpleROS()), duration, args.dt,
+                _propagator(args, SimpleROS()), duration, args.dt,
             )
 
             a_ref = ha(reference)
@@ -631,12 +709,20 @@ def area(args) -> None:
             )
 
     print(
-        "\nRothermel lands every fuel within about 30 percent of the reference\n"
-        "except shrub at low wind, where the whole fire is one or two hectares\n"
-        "and a couple of cells of discretisation is the entire difference. The\n"
-        "presets miss by a factor of 45 on shrub and a factor of 10 on timber.\n"
-        "What is left is the front tracker, not the physics - see `front`."
+        "\nWith the level set, Rothermel lands grass and timber within 10 percent\n"
+        "of the reference; the CA left them within 30. Shrub at low wind is the\n"
+        "exception either way: the whole fire is one or two hectares, and a\n"
+        "couple of cells of discretisation is the entire difference. The presets\n"
+        "miss by a factor of 40 on shrub and 10 on timber - a `fuels.py` problem,\n"
+        "not a front-tracking one."
     )
+
+
+def _propagator(args, ros_model):
+    """The propagator on trial, per `--propagator`."""
+    if args.propagator == "ca":
+        return CAPropagator(ros_model)
+    return LevelSetPropagator(ros_model)
 
 
 def _rothermel(args) -> V.RothermelROS:
@@ -760,7 +846,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "mode",
-        choices=["all", "coefficients", "ros", "rothermel", "front", "residence", "area"],
+        choices=["all", "coefficients", "ros", "rothermel", "front", "heading", "residence", "area"],
     )
     parser.add_argument("--preset", default="grass", choices=list(V.FUEL_EQUIVALENTS))
     parser.add_argument("--wind", type=float, default=3.0, help="midflame wind, m/s")
@@ -768,6 +854,7 @@ def main() -> None:
     parser.add_argument("--cell", type=float, default=20.0, help="metres per cell")
     parser.add_argument("--minutes", type=float, default=120.0)
     parser.add_argument("--dt", type=float, default=5.0)
+    parser.add_argument("--propagator", choices=["levelset", "ca"], default="levelset")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--plot", action="store_true", help="write figures to out/")
     args = parser.parse_args()
@@ -783,6 +870,7 @@ def main() -> None:
         "coefficients": coefficients,
         "ros": ros,
         "front": front,
+        "heading": heading,
         "rothermel": rothermel,
         "residence": residence,
         "area": area,

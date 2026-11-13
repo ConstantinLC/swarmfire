@@ -60,7 +60,7 @@ from ..fuel_models import (
 )
 from ..grid import NEIGHBOR_OFFSETS, slope_vector
 from ..state import FireState
-from .base import ROSModel
+from .base import ROSModel, SpreadEllipse
 from .simple import length_to_breadth
 
 # Rothermel works in feet and minutes; the package works in metres and seconds.
@@ -445,14 +445,21 @@ class RothermelROS(ROSModel):
         heading = torch.where((slope_len > EPS).unsqueeze(1) | (phi_e > EPS).unsqueeze(1), heading, north)
         return phi_e, effective_wind, heading, grad
 
-    def __call__(self, state: FireState) -> Tensor:
+    def ellipse(self, state: FireState) -> SpreadEllipse:
+        ellipse, _ = self._ellipse_and_grad(state)
+        return ellipse
+
+    def _ellipse_and_grad(self, state: FireState) -> tuple[SpreadEllipse, Tensor]:
         base = self.no_wind_no_slope(state)
         phi_e, effective_wind, heading, grad = self._drive(state, base)
-        gx, gy = grad[:, 0], grad[:, 1]
-
         head_ros = base["base_ros"] * (1.0 + phi_e)
-
         lb = length_to_breadth(effective_wind).clamp(max=self.max_length_to_breadth)
+        return SpreadEllipse(head_ros=head_ros, heading=heading, length_to_breadth=lb), grad
+
+    def __call__(self, state: FireState) -> Tensor:
+        ellipse, grad = self._ellipse_and_grad(state)
+        gx, gy = grad[:, 0], grad[:, 1]
+        head_ros, heading, lb = ellipse.head_ros, ellipse.heading, ellipse.length_to_breadth
         ecc = torch.sqrt((1.0 - 1.0 / (lb * lb)).clamp(min=0))
 
         # The offset angle is measured on the slope-tangential plane, not in map

@@ -24,7 +24,7 @@ import torch
 from torch import Tensor
 
 # Layers that evolve. These are what a policy watches change.
-DYNAMIC_LAYERS = ("fuel", "moisture", "intensity", "burned", "ignition", "water", "retardant")
+DYNAMIC_LAYERS = ("fuel", "moisture", "intensity", "burned", "ignition", "water", "retardant", "heat")
 
 # Layers fixed for an episode: terrain and the fuel bed's intrinsic properties.
 # `fuel_model` is a standard fire behaviour fuel model number - the thing a
@@ -32,7 +32,7 @@ DYNAMIC_LAYERS = ("fuel", "moisture", "intensity", "burned", "ignition", "water"
 # from. `ros0`, `moisture_ext` and `burn_rate` are the summary the simpler
 # models and the propagator use; `fuels.rothermel_world` fills them from
 # Rothermel so the two descriptions agree.
-STATIC_LAYERS = ("elevation", "fuel_model", "ros0", "moisture_ext", "burn_rate")
+STATIC_LAYERS = ("elevation", "fuel_model", "ros0", "moisture_ext", "burn_rate", "smoulder")
 
 OBS_LAYERS = DYNAMIC_LAYERS + STATIC_LAYERS
 
@@ -51,13 +51,19 @@ class FireState:
         remaining fuel, and flammability - never integrated directly.
     burned : cumulative fuel consumed. This is the quantity a controller is
         ultimately trying to minimise.
-    ignition : progress of the arriving fire front, in [0, ~1]. It accumulates
-        at exactly the rate at which the front closes on the cell, so it
-        crosses 1 after precisely the physical travel time. This is what keeps
-        spread paced by rate of spread rather than by a feedback loop - see
-        `propagate.py`.
+    ignition : where the fire front is. It crosses 1 at the moment the front
+        reaches the cell, under either propagator: for `LevelSetPropagator` it
+        is the level-set function (`phi = 1 - ignition`, front at `phi = 0`);
+        for `CAPropagator` it accumulates at exactly the rate the front closes
+        on the cell. Either way spread is paced by rate of spread rather than
+        by a feedback loop - see `propagate.py`.
     water : free water on the fuel bed, in mm of equivalent depth. Evaporates.
     retardant : coverage level in [0, 1]. Persistent; decays over hours.
+    heat : leftover heat in [0, 1] - what a cell's fire left behind once the
+        flames went out. Topped up by `intensity`, decays with `smoulder`, and
+        cooled by water. A front, or fuel the front has already reached, can
+        only burn while there is heat nearby; see `_Combustion.liveness`. This
+        is what lets a fire that has burned out behind a held line stay out.
     elevation : metres above datum, used for the slope term in spread.
     fuel_model : standard fire behaviour fuel model number per cell, as a float
         so it stacks with everything else. See `fuel_models.FUEL_MODELS`; 91-99
@@ -68,6 +74,8 @@ class FireState:
         fire - this is what makes a water drop stop a front.
     burn_rate : fuel consumed per second at unit intensity, 1/s. Sets residence
         time.
+    smoulder : e-folding time of `heat`, seconds. Minutes for grass, hours for
+        timber and slash - see `fuels.SMOULDER_S_BY_FAMILY`.
     wind : `[B, 2]` wind vector (east, north) in m/s at midflame height.
     cell_size : grid resolution in metres. 30 m matches LANDFIRE rasters.
     t : `[B]` elapsed simulated seconds.
@@ -80,12 +88,14 @@ class FireState:
     ignition: Tensor
     water: Tensor
     retardant: Tensor
+    heat: Tensor
 
     elevation: Tensor
     fuel_model: Tensor
     ros0: Tensor
     moisture_ext: Tensor
     burn_rate: Tensor
+    smoulder: Tensor
 
     wind: Tensor
     cell_size: float
@@ -154,8 +164,8 @@ def ignite(state: FireState, y: int, x: int, radius: float = 1.5) -> FireState:
 
     The blob is soft rather than a single hot cell so that gradients (and the
     initial fire shape) do not depend on grid alignment. It seeds `ignition`
-    past the arrival threshold; `intensity` is seeded to match so that the very
-    first propagation step already has something to spread from.
+    past the arrival threshold; `intensity` and `heat` are seeded to match so
+    that the very first propagation step already has something to spread from.
     """
     b, h, w = state.batch, *state.grid
     yy = torch.arange(h, device=state.device, dtype=torch.float32).view(-1, 1)
@@ -165,4 +175,5 @@ def ignite(state: FireState, y: int, x: int, radius: float = 1.5) -> FireState:
     return state.replace(
         ignition=state.ignition + 1.5 * blob,
         intensity=(state.intensity + blob).clamp(max=1.0),
+        heat=(state.heat + blob).clamp(max=1.0),
     )

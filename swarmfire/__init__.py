@@ -10,7 +10,7 @@
 The pieces are meant to be replaced one at a time:
 
     ros_model    SimpleROS -> RothermelROS      (physics realism)
-    propagator   CAPropagator -> level set      (front geometry)
+    propagator   LevelSetPropagator / CAPropagator (front geometry)
     platform     helicopter -> tanker / swarm   (action constraints)
     suppression  water/retardant -> foam, gel   (agent chemistry)
 """
@@ -19,8 +19,8 @@ from .env import EnvConfig, FireEnv
 from .fuel_models import FUEL_MODEL_NAMES, FUEL_MODELS
 from .fuels import PRESETS, patchy_world, rothermel_world, uniform_world
 from .platforms import DiscPlatform, LineDropPlatform, Platform, PlatformSpec, make_platform
-from .propagate import CAPropagator, Propagator
-from .ros import ConstantROS, ROSModel, RothermelROS, SimpleROS
+from .propagate import CAPropagator, LevelSetPropagator, Propagator
+from .ros import ConstantROS, ROSModel, RothermelROS, SimpleROS, SpreadEllipse
 from .state import DYNAMIC_LAYERS, OBS_LAYERS, STATIC_LAYERS, FireState, ignite
 from .suppression import SuppressionModel
 
@@ -31,8 +31,8 @@ __all__ = [
     "FireState", "ignite", "OBS_LAYERS", "DYNAMIC_LAYERS", "STATIC_LAYERS",
     "uniform_world", "patchy_world", "rothermel_world", "PRESETS",
     "FUEL_MODELS", "FUEL_MODEL_NAMES",
-    "ROSModel", "SimpleROS", "ConstantROS", "RothermelROS",
-    "Propagator", "CAPropagator",
+    "ROSModel", "SpreadEllipse", "SimpleROS", "ConstantROS", "RothermelROS",
+    "Propagator", "LevelSetPropagator", "CAPropagator",
     "SuppressionModel",
     "Platform", "PlatformSpec", "DiscPlatform", "LineDropPlatform", "make_platform",
 ]

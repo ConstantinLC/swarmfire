@@ -7,17 +7,42 @@ metres per second. Nothing downstream knows or cares how that number was
 produced.
 
 Swapping `SimpleROS` for `RothermelROS` is the whole "get realistic" step.
+
+A ROS model also exposes the fire ellipse itself through `ellipse`. The eight
+directional rates are that ellipse sampled at the eight neighbour bearings,
+which is all a cellular automaton can use; the level-set propagator needs the
+ellipse unsampled, to evaluate it along whatever direction the front faces.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
 from ..grid import N_DIRS, neighbor_distances
 from ..state import FireState
+
+
+@dataclass
+class SpreadEllipse:
+    """The per-cell fire ellipse, before it is sampled onto the grid.
+
+    head_ros : `[B, H, W]` rate of spread along the heading, m/s, measured on
+        the slope-tangential plane.
+    heading : `[B, 3, H, W]` unit heading (east, north, rise), lying in the
+        slope-tangential plane. On flat ground the rise component is zero.
+    length_to_breadth : `[B, H, W]` ellipse length/breadth ratio, >= 1.
+
+    The ignition point sits at the rear focus, so backing and flanking rates
+    follow from these three alone - see `LevelSetPropagator`.
+    """
+
+    head_ros: Tensor
+    heading: Tensor
+    length_to_breadth: Tensor
 
 
 class ROSModel(ABC):
@@ -27,6 +52,10 @@ class ROSModel(ABC):
     def __call__(self, state: FireState) -> Tensor:
         """Return `[B, 8, H, W]` spread rates in m/s, direction order per
         `grid.NEIGHBOR_OFFSETS`."""
+
+    @abstractmethod
+    def ellipse(self, state: FireState) -> SpreadEllipse:
+        """The fire ellipse `__call__` samples, per cell."""
 
     def max_stable_dt(self, state: FireState, courant: float = 0.4) -> float:
         """Largest timestep that keeps the front from jumping a cell per step.
@@ -50,3 +79,13 @@ class ConstantROS(ROSModel):
     def __call__(self, state: FireState) -> Tensor:
         b, h, w = state.batch, *state.grid
         return torch.full((b, N_DIRS, h, w), self.speed, device=state.device)
+
+    def ellipse(self, state: FireState) -> SpreadEllipse:
+        b, h, w = state.batch, *state.grid
+        heading = torch.zeros(b, 3, h, w, device=state.device)
+        heading[:, 0] = 1.0
+        return SpreadEllipse(
+            head_ros=torch.full((b, h, w), self.speed, device=state.device),
+            heading=heading,
+            length_to_breadth=torch.ones(b, h, w, device=state.device),
+        )

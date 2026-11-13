@@ -21,7 +21,7 @@ from torch import Tensor
 
 from ..grid import N_DIRS, neighbor_angles, slope_vector
 from ..state import FireState
-from .base import ROSModel
+from .base import ROSModel, SpreadEllipse
 
 
 def length_to_breadth(wind_speed: Tensor) -> Tensor:
@@ -88,9 +88,7 @@ class SimpleROS(ROSModel):
         heading = torch.atan2(drive[:, 1], drive[:, 0])
         return magnitude, heading
 
-    def __call__(self, state: FireState) -> Tensor:
-        magnitude, heading = self._drive(state)
-
+    def _head_and_eccentricity(self, magnitude: Tensor, state: FireState) -> tuple[Tensor, Tensor]:
         head_ros = state.ros0 * (1.0 + magnitude)
 
         # Effective wind speed: the wind that alone would produce this forcing.
@@ -103,6 +101,31 @@ class SimpleROS(ROSModel):
         # weather produces, but a bad elevation gradient once did, and the NaN
         # covered the whole grid in a single step. This form saturates at 1.
         ecc = torch.sqrt((1.0 - 1.0 / (lb * lb)).clamp(min=0)).clamp(max=self.max_eccentricity)
+        return head_ros, ecc
+
+    def ellipse(self, state: FireState) -> SpreadEllipse:
+        """The same ellipse, with the heading lifted onto the slope plane.
+
+        `__call__` works in map projection; the level-set propagator measures
+        the front on the terrain surface, as Rothermel and `pyretechnics` do.
+        The heading therefore gains the rise it makes over the ground, which on
+        flat ground is nothing.
+        """
+        magnitude, heading = self._drive(state)
+        head_ros, ecc = self._head_and_eccentricity(magnitude, state)
+
+        grad = slope_vector(state.elevation, state.cell_size)
+        ux, uy = torch.cos(heading), torch.sin(heading)
+        lifted = torch.stack([ux, uy, ux * grad[:, 0] + uy * grad[:, 1]], dim=1)
+        lifted = lifted / torch.linalg.vector_norm(lifted, dim=1, keepdim=True)
+
+        # Back from the capped eccentricity, so the cap applies here too.
+        lb = 1.0 / torch.sqrt(1.0 - ecc * ecc)
+        return SpreadEllipse(head_ros=head_ros, heading=lifted, length_to_breadth=lb)
+
+    def __call__(self, state: FireState) -> Tensor:
+        magnitude, heading = self._drive(state)
+        head_ros, ecc = self._head_and_eccentricity(magnitude, state)
 
         angles = neighbor_angles(device=state.device).view(1, N_DIRS, 1, 1)
         cos_off = torch.cos(angles - heading.unsqueeze(1))

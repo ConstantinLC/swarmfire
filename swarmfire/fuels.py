@@ -43,6 +43,39 @@ class FuelPreset:
 FUEL_MODEL_FOR_PRESET: dict[str, int] = {"grass": 102, "shrub": 142, "timber": 183}
 
 
+# How long leftover heat lingers after the flames go out, in seconds: the
+# e-folding time of the `heat` layer. Fine fuels hold almost nothing once the
+# flaming front has passed; logs, stumps and duff smoulder for hours, which is
+# what makes holdover fires and rekindles a timber problem rather than a grass
+# one. Like the presets, these are orders of magnitude, not calibrated values -
+# keyed by fuel model family so that any world, preset or LANDFIRE-built, gets
+# one without further input.
+SMOULDER_S_BY_FAMILY: tuple[tuple[range, float], ...] = (
+    (range(1, 4), 300.0),       # Anderson grass
+    (range(4, 8), 1800.0),      # Anderson shrub
+    (range(8, 11), 7200.0),     # Anderson timber litter
+    (range(11, 14), 14400.0),   # Anderson slash
+    (range(101, 110), 300.0),   # GR grass
+    (range(121, 125), 900.0),   # GS grass-shrub
+    (range(141, 150), 1800.0),  # SH shrub
+    (range(161, 166), 3600.0),  # TU timber-understory
+    (range(181, 190), 7200.0),  # TL timber litter
+    (range(201, 205), 14400.0), # SB slash-blowdown
+)
+
+
+def smoulder_time(fuel_model: Tensor) -> Tensor:
+    """Per-cell `smoulder` layer, seconds, from fuel model numbers.
+
+    Non-burnable codes (91-99) and anything not in the table get zero.
+    """
+    out = torch.zeros_like(fuel_model)
+    for family, seconds in SMOULDER_S_BY_FAMILY:
+        in_family = (fuel_model >= family.start) & (fuel_model < family.stop)
+        out = torch.where(in_family, torch.full_like(out, seconds), out)
+    return out
+
+
 # Grass carries fire fast and dries out early; timber litter is the opposite.
 PRESETS: dict[str, FuelPreset] = {
     "grass": FuelPreset("grass", ros0=0.020, moisture_ext=0.12, residence=60.0, moisture=0.06),
@@ -77,6 +110,7 @@ def uniform_world(
     xx = torch.arange(w, device=dev, dtype=torch.float32).view(1, -1) * cell_size
     elevation = (slope[0] * xx + slope[1] * yy).expand(batch, h, w).contiguous()
 
+    fuel_model = ones * FUEL_MODEL_FOR_PRESET[preset]
     return FireState(
         fuel=ones.clone(),
         moisture=ones * fp.moisture,
@@ -85,11 +119,13 @@ def uniform_world(
         ignition=torch.zeros_like(ones),
         water=torch.zeros_like(ones),
         retardant=torch.zeros_like(ones),
+        heat=torch.zeros_like(ones),
         elevation=elevation,
-        fuel_model=ones * FUEL_MODEL_FOR_PRESET[preset],
+        fuel_model=fuel_model,
         ros0=ones * fp.ros0,
         moisture_ext=ones * fp.moisture_ext,
         burn_rate=ones * fp.burn_rate,
+        smoulder=smoulder_time(fuel_model),
         wind=torch.tensor(wind, device=dev, dtype=torch.float32).expand(batch, 2).contiguous(),
         cell_size=cell_size,
         t=torch.zeros(batch, device=dev),
@@ -133,7 +169,8 @@ def patchy_world(
         model += mask * FUEL_MODEL_FOR_PRESET[name]
 
     return state.replace(
-        ros0=ros0, moisture_ext=mx, burn_rate=br, moisture=moist, fuel_model=model
+        ros0=ros0, moisture_ext=mx, burn_rate=br, moisture=moist, fuel_model=model,
+        smoulder=smoulder_time(model),
     )
 
 
@@ -174,6 +211,7 @@ def rothermel_world(
     models = torch.as_tensor(fuel_model, dtype=torch.float32, device=state.device)
     state = state.replace(
         fuel_model=models.expand_as(state.ros0).contiguous(),
+        smoulder=smoulder_time(models.expand_as(state.ros0).contiguous()),
         moisture=torch.full_like(state.moisture, float(moisture)),
     )
 

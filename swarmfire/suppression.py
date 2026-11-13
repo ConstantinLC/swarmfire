@@ -45,6 +45,10 @@ class SuppressionModel:
     water_tau_ambient : e-folding time of evaporation with no fire, seconds.
     water_tau_fire : e-folding time directly in the flame front. Minutes. This
         is why a drop placed too early is wasted.
+    water_quench_s : e-folding time of leftover `heat` under 1 mm of water,
+        seconds; the rate scales with depth. This is mop-up: water on ground
+        that has stopped flaming cools what is still smouldering, so it cannot
+        rekindle once the water has gone.
     retardant_tau : e-folding time of retardant effectiveness, seconds. Hours.
     retardant_efficacy : flammability multiplier at full coverage. Below 1.0
         rather than 0, because retardant lines do get crossed.
@@ -56,6 +60,7 @@ class SuppressionModel:
     water_to_moisture: float = 0.8
     water_tau_ambient: float = 3600.0
     water_tau_fire: float = 60.0
+    water_quench_s: float = 60.0
     retardant_tau: float = 12 * 3600.0
     retardant_efficacy: float = 0.95
     softness: float = 0.02
@@ -77,6 +82,10 @@ class SuppressionModel:
         wet_gate = torch.sigmoid(margin)
         retardant_gate = 1.0 - self.retardant_efficacy * state.retardant.clamp(0, 1)
         return wet_gate * retardant_gate
+
+    def cooling_rate(self, state: FireState) -> Tensor:
+        """`[B, H, W]` rate, 1/s, at which water removes leftover heat."""
+        return state.water / self.water_quench_s
 
     # ------------------------------------------------------------- dynamics
 
